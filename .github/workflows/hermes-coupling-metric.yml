@@ -42,13 +42,10 @@ jobs:
             echo "Lower is better. \`make patch-metric\` runs the same check locally and"
             echo "fails on a regression; \`hack/patch-metric.sh --update\` lowers the"
             echo "baseline once a milestone has earned it."
-            echo ""
-            echo "\`python3 hack/hermes_touchpoints.py --list\` names every touchpoint"
-            echo "behind the counts. The prose inventory is \`docs/designs/hermes-touchpoints.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Run again for the job log, and surface a regression as a notice so it
           # is visible in the checks list without turning the pull request red.
           if ! bash hack/patch-metric.sh; then
-            echo "::notice title=Hermes coupling grew::A patch set, an inline Hermes source edit, a monkey patch target, a plugin importing Hermes internals, or direct access to a Hermes table was added. See the job summary; implementation.md section 0.4 says a milestone needing more Hermes coupling is mis-designed."
+            echo "::notice title=Hermes coupling grew::A patch set, an inline Hermes source edit, a monkey patch target, a plugin importing Hermes internals, or direct access to a Hermes table was added. See the job summary for which. A change that needs more Hermes coupling to work is a change that should be redesigned, not baselined."
           fi

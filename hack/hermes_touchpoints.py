@@ -10,8 +10,8 @@ moves the patch-set count, so none of it shows up in the ratchet.
 
 This module counts those four, and `patch-metric.sh` folds the numbers into the
 one table and the one baseline file so there is a single ratchet rather than
-two. `docs/designs/hermes-touchpoints.md` is the prose inventory these counts
-must agree with; if they diverge, one of the two is stale.
+two. `--list` prints every touchpoint behind the counts, so the inventory is
+the scan itself and cannot go stale against it.
 
 Why Python rather than more bash: three of the four counts are questions about
 Python syntax ("which attribute does this assign", "what does this import"), and

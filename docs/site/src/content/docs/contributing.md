@@ -48,6 +48,21 @@ Before pushing, run the checks CI enforces:
   make validate   # fails if skills live under agents/*/defaults/skills/ instead of agents/*/skills/
   ```
 
+- **Python unit tests** (if you touched any Python outside `k8s-operator/`):
+
+  ```bash
+  make test-python-deps   # once, for the few third-party imports the agent scripts need
+  make test-python
+  ```
+
+- **Hermes coupling metric** (if you touched the image build, the patches, or `sitecustomize.py`):
+
+  ```bash
+  make patch-metric   # fails if the build couples to Hermes in more places than the checked-in baseline
+  ```
+
+  The baseline is a ratchet: it may fall, and `hack/patch-metric.sh --update` refuses to raise it. Run `python3 hack/hermes_touchpoints.py --list` to see which touchpoint each number counted.
+
 - **Docker build** (if you touched the platform-agent image):
 
   ```bash

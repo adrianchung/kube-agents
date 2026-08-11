@@ -14,8 +14,8 @@
 # inside plugins, and opens a Hermes-owned SQLite database directly. Those four
 # are counted by `hack/hermes_touchpoints.py` -- three of them are questions
 # about Python syntax, which `ast` answers exactly and a grep only guesses at --
-# and folded into the table below. See `docs/designs/hermes-touchpoints.md` for
-# the prose inventory the counts must agree with.
+# and folded into the table below. `python3 hack/hermes_touchpoints.py --list`
+# names every touchpoint behind those four counts.
 #
 # The harness-v2 direction is to move the responsibilities we patch hardest
 # (cron, kanban, chat adapters, approvals) out of Hermes, so every one of those
@@ -228,8 +228,8 @@ BASELINE_APPLY_SETS=$apply_sets
 BASELINE_VERIFY_SETS=$verify_sets
 BASELINE_DOCKERFILE_PATCH_REFS=$dockerfile_patch_refs
 
-# Counted by hack/hermes_touchpoints.py; agree with the inventory in
-# docs/designs/hermes-touchpoints.md.
+# Counted by hack/hermes_touchpoints.py; run it with --list to see what each
+# number matched.
 BASELINE_DOCKERFILE_EDITS=$HERMES_TOUCHPOINT_DOCKERFILE_EDITS
 BASELINE_SITECUSTOMIZE_TARGETS=$HERMES_TOUCHPOINT_SITECUSTOMIZE_TARGETS
 BASELINE_INTERNAL_IMPORT_PLUGINS=$HERMES_TOUCHPOINT_INTERNAL_IMPORT_PLUGINS

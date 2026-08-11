@@ -79,12 +79,12 @@ prettier-write: ## Reformat all Markdown/YAML in place.
 # `make test-python-deps`. CI installs the same file.
 #
 # The wildcards are what keep this honest: a new skill's tests are picked up
-# without editing this file. Six globs rather than one because the tests do
+# without editing this file. Seven globs rather than one because the tests do
 # not all live under skills -- the agent scripts the skills share, the Chat
 # Agent plugins, the image patches, the image build itself and the
-# repository's own tooling in scripts/ each hold their own. scripts/ is here
-# because it was not: the tests for the upstream-skill sync sat outside every
-# glob, so they had never once run in CI. Discovery is then run once per
+# repository's own tooling in scripts/ and hack/ each hold their own. scripts/
+# is here because it was not: the tests for the upstream-skill sync sat outside
+# every glob, so they had never once run in CI. Discovery is then run once per
 # directory rather than once over the tree, because none of them are packages
 # -- `unittest discover` pointed at agents/platform/skills finds nothing and
 # still exits 0, which reads as a passing suite. That also keeps

@@ -5,4 +5,4 @@ kind: Kustomization
 images:
   - name: controller
     newName: ghcr.io/gke-labs/kube-agents/k8s-operator
-    newTag: latest
+    newTag: 282ef1244b1a1eab923ac0242c657857d8bf020e
