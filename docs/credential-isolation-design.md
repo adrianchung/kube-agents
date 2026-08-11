@@ -198,6 +198,52 @@ is safe there. See the site's
 [security and IAM reference](site/src/content/docs/reference/security-and-iam.md)
 for the operator-facing view of what enforcing costs and where it buys anything.
 
+`gh` and `git push` have a second gate of the same shape, `ForgePolicy`, built
+on the same argument-vector parsing and sharing the three modes. It exists
+because the regex rules above cover only credential disclosure and tool
+self-modification, which leaves a repository-scoped GitHub App token free to
+merge the pull request it just opened, approve its own review, delete a branch
+or force-push over the default branch — every one of those a write the "the
+agent proposes, a human merges" claim assumes cannot happen, and every one of
+them within the `contents: write` and `pull_requests: write` this repository's
+App actually grants.
+
+For `gh` it is an allowlist of commands, for the reason the `kubectl` gate is
+one: the surface grows with every release, and an unclassified subcommand should
+fail closed. The allowed set is the reads plus the proposal path —
+`pr`/`issue` create, edit, comment, close, reopen, and `label create` — and
+`gh api` restricted to `GET` or `HEAD`, which needs its own check because a
+`-f`/`-F` field flag switches gh's default method to POST without changing the
+shape of the command line. `gh api graphql` is refused outright rather than left
+to those two rules: GraphQL states its verb inside `query=`, so a mutation and a
+query are the same argument vector.
+
+The refusals for `gh secret`, `gh variable` and `gh workflow run` are the one
+part of the allowlist that guards nothing today — `config/integrations/github/`
+`configmap.yaml.template` grants `contents`, `pull_requests` and `issues` only,
+and those commands need `secrets: write` and `actions: write`. They are in the
+denied set for the install that widens the App's permissions without coming back
+to this file.
+
+For `git push` there is no verb to allow: `push` is the only remote-write verb
+git has, so the check is on the destination refspec instead. It refuses the
+protected branches, deletions in both spellings, `--all` and `--mirror` — which
+push refs the argv never names — and a bare `git push`, whose destination
+depends on `push.default` and the current branch and is therefore not decidable
+from the argument vector. Deliberately not refused: force. A pull request that
+returns for review has to update its own branch, which is why
+`submit_suggestion` pushes `--force-with-lease`; what makes a force dangerous is
+the target, which is what is checked. Also not refused: `--dry-run`, which
+short-circuits every one of those checks, because it writes nothing and asking
+the remote what a push would do is a read.
+
+The protected-branch list is the same three names the `submit-suggestion` and
+`fleet-audit` helpers refuse at the skill layer, and the duplication is the
+point: the proxy check is the one the agent cannot bypass by calling `git`
+itself. The rule ids are `github.write-path` and `git.push-target`, and unlike
+the `kubectl` gate this one defaults to `enforce`, because a survey of every
+`gh` and `git push` call site in the repository found none that it refuses.
+
 ### Agent-supplied kubeconfigs
 
 A Cluster Agent profile pins itself to one cluster through `KUBECONFIG`, and

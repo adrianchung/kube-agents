@@ -23,11 +23,14 @@ from credential_proxy import (
     AgentAPIProxyHandler,
     CommandExecutor,
     CredentialProxyHandler,
+    ForgePolicy,
     GoogleChatRelay,
     KubernetesPolicy,
     Policy,
     SlackRelay,
     _chat_error_fields,
+    _gh_plan,
+    _git_push_plan,
     _kubectl_plan,
     _slack_error_detail,
     _slack_error_fields,
@@ -997,6 +1000,559 @@ class KubectlGateWiringTest(unittest.TestCase):
         )
         self.assertEqual(403, status)
         self.assertEqual("git.workspace.lease", body["rule"])
+
+
+class GhPlanTest(unittest.TestCase):
+    """The `gh` argv parser, tested where a regex over the joined string differs."""
+
+    def test_the_command_is_two_tokens_when_the_first_is_a_compound(self):
+        plan = _gh_plan(["gh", "pr", "merge", "17"])
+        self.assertEqual("pr merge", plan.command)
+
+    def test_the_command_is_one_token_when_the_first_is_not(self):
+        plan = _gh_plan(["gh", "api", "repos/acme/fleet/pulls"])
+        self.assertEqual("api", plan.command)
+
+    def test_a_global_flags_value_is_not_read_as_the_command(self):
+        plan = _gh_plan(["gh", "--repo", "issue", "pr", "list"])
+        self.assertEqual("pr list", plan.command)
+
+    def test_a_repo_named_like_a_subcommand_does_not_become_one(self):
+        # `-R merge` is the shape that breaks a regex: the joined string
+        # contains "gh … merge" and matches a naive `gh pr merge` pattern.
+        plan = _gh_plan(["gh", "pr", "view", "3", "-R", "merge/merge"])
+        self.assertEqual("pr view", plan.command)
+
+    def test_the_display_keeps_both_tokens_even_for_a_non_compound(self):
+        plan = _gh_plan(["gh", "secret", "set", "TOKEN"])
+        self.assertEqual("secret", plan.command)
+        self.assertEqual("secret set", plan.display)
+
+    def test_a_bare_gh_has_no_command(self):
+        self.assertIsNone(_gh_plan(["gh", "--version"]).command)
+
+    def test_the_method_is_found_after_the_endpoint(self):
+        # gh takes flags on either side of the operand, and the dangerous one
+        # is conventionally written after it.
+        plan = _gh_plan(["gh", "api", "repos/acme/fleet", "-X", "DELETE"])
+        self.assertEqual("DELETE", plan.api_method)
+
+    def test_an_inline_method_is_found_too(self):
+        plan = _gh_plan(["gh", "api", "--method=PATCH", "repos/acme/fleet"])
+        self.assertEqual("PATCH", plan.api_method)
+
+    def test_a_field_flag_is_noticed(self):
+        plan = _gh_plan(["gh", "api", "repos/acme/fleet/issues", "-f", "title=x"])
+        self.assertTrue(plan.api_fields)
+
+    def test_a_field_flags_value_is_not_read_as_an_operand(self):
+        # Without consuming the value, `title=x` would be operand two and the
+        # endpoint would be lost.
+        plan = _gh_plan(["gh", "api", "-f", "title=x", "repos/acme/fleet/issues"])
+        self.assertEqual("api repos/acme/fleet/issues", plan.display)
+
+
+class GitPushPlanTest(unittest.TestCase):
+    """The `git push` refspec parser."""
+
+    def test_a_bare_branch_pushes_to_the_same_name(self):
+        plan = _git_push_plan(["git", "push", "origin", "topic"])
+        self.assertEqual(("topic",), plan.destinations)
+
+    def test_the_destination_is_the_half_after_the_colon(self):
+        plan = _git_push_plan(["git", "push", "origin", "HEAD:main"])
+        self.assertEqual(("main",), plan.destinations)
+
+    def test_a_fully_qualified_ref_folds_onto_the_branch_name(self):
+        plan = _git_push_plan(["git", "push", "origin", "HEAD:refs/heads/main"])
+        self.assertEqual(("main",), plan.destinations)
+
+    def test_a_leading_plus_is_a_force_marker_and_not_part_of_the_name(self):
+        plan = _git_push_plan(["git", "push", "origin", "+topic:main"])
+        self.assertEqual(("main",), plan.destinations)
+
+    def test_an_empty_source_half_is_a_deletion(self):
+        plan = _git_push_plan(["git", "push", "origin", ":main"])
+        self.assertEqual(("main",), plan.deletions)
+        self.assertEqual((), plan.destinations)
+
+    def test_the_delete_flag_makes_every_refspec_a_deletion(self):
+        plan = _git_push_plan(["git", "push", "--delete", "origin", "topic"])
+        self.assertEqual(("topic",), plan.deletions)
+
+    def test_the_remote_is_not_mistaken_for_a_refspec(self):
+        plan = _git_push_plan(["git", "push", "main"])
+        self.assertEqual((), plan.destinations)
+
+    def test_a_push_option_value_is_not_read_as_a_refspec(self):
+        plan = _git_push_plan(["git", "push", "-o", "main", "origin", "topic"])
+        self.assertEqual(("topic",), plan.destinations)
+
+    def test_force_with_lease_does_not_swallow_the_remote(self):
+        # Its value is only ever `=`-attached; consuming the next token would
+        # leave `topic` as the remote and no refspec at all.
+        plan = _git_push_plan(
+            ["git", "push", "--force-with-lease", "origin", "topic"]
+        )
+        self.assertEqual(("topic",), plan.destinations)
+
+    def test_a_c_redirect_does_not_hide_the_subcommand(self):
+        plan = _git_push_plan(["git", "-C", "/w", "push", "origin", "main"])
+        self.assertEqual(("main",), plan.destinations)
+
+    def test_the_repo_flag_supplies_the_remote_so_every_operand_is_a_refspec(self):
+        # `--repo` is equivalent to the repository operand, so skipping the
+        # first operand here would drop the only refspec on the line.
+        for argv in (
+            ["git", "push", "--repo=origin", "main"],
+            ["git", "push", "--repo", "origin", "main"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(("main",), _git_push_plan(argv).destinations)
+
+    def test_anything_but_push_is_not_this_parsers_business(self):
+        self.assertIsNone(_git_push_plan(["git", "commit", "-m", "push"]))
+
+
+class ForgeGhGateTest(unittest.TestCase):
+    """What the agent may and may not ask GitHub to do."""
+
+    def setUp(self):
+        self.policy = ForgePolicy(mode="enforce")
+
+    def assertAllowed(self, argv):
+        violation = self.policy.violation(argv)
+        self.assertIsNone(violation, f"{argv} was refused: {violation}")
+
+    def assertRefused(self, argv, expected="github.write-path"):
+        violation = self.policy.violation(argv)
+        self.assertIsNotNone(violation, f"{argv} was allowed")
+        self.assertEqual(expected, violation.rule_id)
+        return violation
+
+    def test_the_whole_shipped_surface_is_allowed(self):
+        # Every `gh` call an AST scan finds in audit_report, resolver and
+        # submit_suggestion. If one of these starts failing, a skill broke.
+        for argv in (
+            ["gh", "pr", "create", "-R", "acme/fleet", "--title", "t"],
+            ["gh", "pr", "edit", "7", "-R", "acme/fleet", "--add-label", "x"],
+            ["gh", "pr", "comment", "7", "-R", "acme/fleet", "-F", "body.md"],
+            ["gh", "pr", "close", "7", "-R", "acme/fleet"],
+            ["gh", "pr", "list", "-R", "acme/fleet", "--state", "all"],
+            ["gh", "pr", "view", "7", "-R", "acme/fleet", "--json", "comments"],
+            ["gh", "issue", "create", "-R", "acme/fleet", "--title", "t"],
+            ["gh", "issue", "edit", "7", "-R", "acme/fleet", "--body-file", "b"],
+            ["gh", "issue", "comment", "7", "-R", "acme/fleet", "--body", "x"],
+            ["gh", "issue", "close", "7", "-R", "acme/fleet", "--reason", "done"],
+            ["gh", "issue", "list", "-R", "acme/fleet", "--label", "x"],
+            ["gh", "issue", "view", "7", "-R", "acme/fleet", "--json", "body"],
+            ["gh", "label", "create", "status:x", "-R", "acme/fleet", "--force"],
+            ["gh", "auth", "status"],
+            ["gh", "api", "repos/acme/fleet/pulls/7/comments"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertAllowed(argv)
+
+    def test_merging_its_own_pull_request_is_refused(self):
+        violation = self.assertRefused(["gh", "pr", "merge", "7", "--squash"])
+        self.assertIn("does not merge", violation.message)
+
+    def test_approving_its_own_pull_request_is_refused(self):
+        # Self-approval is merging with extra steps wherever branch protection
+        # counts approvals.
+        self.assertRefused(["gh", "pr", "review", "7", "--approve"])
+
+    def test_checking_a_branch_out_through_gh_is_refused(self):
+        # `gh pr checkout` writes a working tree, and the lease gate only knows
+        # how to read `git` argv — so this is the way around it.
+        self.assertRefused(["gh", "pr", "checkout", "7"])
+
+    def test_repository_administration_is_refused(self):
+        for argv in (
+            ["gh", "repo", "delete", "acme/fleet", "--yes"],
+            ["gh", "repo", "edit", "--visibility", "public"],
+            ["gh", "repo", "archive", "acme/fleet"],
+            ["gh", "repo", "rename", "gone"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertRefused(argv)
+
+    def test_reading_a_repository_is_still_allowed(self):
+        self.assertAllowed(["gh", "repo", "view", "acme/fleet"])
+
+    def test_dispatching_ci_is_refused(self):
+        for argv in (
+            ["gh", "workflow", "run", "deploy.yml"],
+            ["gh", "workflow", "enable", "deploy.yml"],
+            ["gh", "run", "rerun", "42"],
+            ["gh", "run", "cancel", "42"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertRefused(argv)
+
+    def test_reading_ci_is_still_allowed(self):
+        self.assertAllowed(["gh", "run", "view", "42", "--log"])
+        self.assertAllowed(["gh", "workflow", "list"])
+
+    def test_writing_credentials_and_tooling_is_refused(self):
+        for argv in (
+            ["gh", "secret", "set", "TOKEN"],
+            ["gh", "variable", "set", "REGION", "--body", "us"],
+            ["gh", "ssh-key", "add", "id.pub"],
+            ["gh", "auth", "login", "--with-token"],
+            ["gh", "extension", "install", "acme/evil"],
+            ["gh", "alias", "set", "m", "pr merge"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertRefused(argv)
+
+    def test_an_alias_cannot_smuggle_a_denied_command_past_the_gate(self):
+        # Aliases expand client-side, so the argv the gate sees is `gh m` —
+        # which is not on the allowlist, and an allowlist fails closed.
+        self.assertRefused(["gh", "m", "7"])
+
+    def test_a_subcommand_invented_after_this_gate_fails_closed(self):
+        self.assertRefused(["gh", "ruleset", "delete", "1"])
+
+    def test_gh_api_is_allowed_to_read(self):
+        self.assertAllowed(["gh", "api", "repos/acme/fleet/pulls/7/comments"])
+        self.assertAllowed(
+            ["gh", "api", "repos/acme/fleet/pulls", "--paginate", "--jq", ".[]"]
+        )
+
+    def test_gh_api_with_a_mutating_method_is_refused(self):
+        for method in ("POST", "PATCH", "PUT", "DELETE", "delete"):
+            with self.subTest(method=method):
+                violation = self.assertRefused(
+                    ["gh", "api", "repos/acme/fleet", "-X", method]
+                )
+                self.assertIn("read", violation.message)
+
+    def test_gh_api_with_a_field_is_refused_even_with_no_method(self):
+        # This is the whole reason `gh api` needs its own check: a field flag
+        # silently switches gh's default method from GET to POST, so the argv
+        # that files an issue looks exactly like the argv that reads one.
+        violation = self.assertRefused(
+            ["gh", "api", "repos/acme/fleet/issues", "-f", "title=pwned"]
+        )
+        self.assertIn("GET to POST", violation.message)
+
+    def test_gh_api_with_a_field_and_an_explicit_get_is_allowed(self):
+        self.assertAllowed(
+            ["gh", "api", "repos/acme/fleet/issues", "--method", "GET", "-f", "x=1"]
+        )
+
+    def test_a_head_request_is_a_read(self):
+        self.assertAllowed(["gh", "api", "repos/acme/fleet", "-X", "HEAD"])
+
+    def test_graphql_is_refused_however_it_is_spelled(self):
+        # The method and field rules catch the ordinary spelling, but GraphQL
+        # puts the verb inside the query text, so an explicit GET makes a
+        # mutation look like a query parameter. Refused by endpoint instead.
+        for argv in (
+            ["gh", "api", "graphql", "-f", "query=x"],
+            ["gh", "api", "graphql", "--method", "GET", "-f", "query=mutation{x}"],
+            ["gh", "api", "graphql", "-X", "HEAD"],
+            ["gh", "api", "GraphQL", "--method", "GET"],
+        ):
+            with self.subTest(argv=argv):
+                violation = self.assertRefused(argv)
+                self.assertIn("gh api graphql", violation.message)
+
+    def test_an_endpoint_merely_containing_graphql_is_not_the_graphql_endpoint(self):
+        self.assertAllowed(["gh", "api", "repos/acme/graphql-tools/pulls"])
+
+    def test_the_refusal_names_what_was_actually_run(self):
+        # Reporting `gh secret set` as "`gh secret` is not allowed" invites the
+        # reply that `gh secret list` is harmless, which is true and beside the
+        # point.
+        violation = self.assertRefused(["gh", "secret", "set", "TOKEN"])
+        self.assertIn("gh secret set", violation.message)
+
+
+class ForgeGitPushGateTest(unittest.TestCase):
+    """Where a push may land."""
+
+    def setUp(self):
+        self.policy = ForgePolicy(mode="enforce")
+
+    def assertAllowed(self, argv):
+        violation = self.policy.violation(argv)
+        self.assertIsNone(violation, f"{argv} was refused: {violation}")
+
+    def assertRefused(self, argv):
+        violation = self.policy.violation(argv)
+        self.assertIsNotNone(violation, f"{argv} was allowed")
+        self.assertEqual("git.push-target", violation.rule_id)
+        return violation
+
+    def test_the_shipped_pushes_are_allowed(self):
+        # `submit_suggestion.push_branch` and `audit_report.open_remediation_pr`.
+        self.assertAllowed(
+            ["git", "push", "--force-with-lease", "origin", "fix/thing"]
+        )
+        self.assertAllowed(["git", "push", "-f", "origin", "audit/remediation-1"])
+
+    def test_force_is_not_what_this_gate_objects_to(self):
+        # `submit_suggestion.push_branch` explains why a force is legitimate: a
+        # pull request that comes back for review has to update its own branch.
+        self.assertAllowed(["git", "push", "--force", "origin", "topic"])
+
+    def test_pushing_to_the_default_branch_is_refused(self):
+        for argv in (
+            ["git", "push", "origin", "main"],
+            ["git", "push", "origin", "master"],
+            ["git", "push", "origin", "production"],
+            ["git", "push", "origin", "Main"],
+            ["git", "push", "origin", "HEAD:main"],
+            ["git", "push", "origin", "topic:main"],
+            ["git", "push", "origin", "+topic:refs/heads/main"],
+            ["git", "push", "--force", "origin", "main"],
+        ):
+            with self.subTest(argv=argv):
+                violation = self.assertRefused(argv)
+                self.assertIn("protected branch", violation.message)
+
+    def test_the_repo_flag_does_not_hide_the_destination(self):
+        # Refused either way, but for the right reason: with the operand read as
+        # the remote this came back as "no refspec", which sends whoever hits it
+        # looking for a missing argument rather than at the branch they named.
+        violation = self.assertRefused(["git", "push", "--repo=origin", "main"])
+        self.assertIn("protected branch", violation.message)
+        self.assertAllowed(["git", "push", "--repo=origin", "topic"])
+
+    def test_a_branch_merely_named_after_a_protected_one_is_allowed(self):
+        # `main` is protected; `maintenance` and `fix/main-crash` are not.
+        self.assertAllowed(["git", "push", "origin", "maintenance"])
+        self.assertAllowed(["git", "push", "origin", "fix/main-crash"])
+
+    def test_the_default_list_matches_the_skills_own(self):
+        # Two layers refusing different sets of branches would be worse than
+        # either: `submit_suggestion.check_branch` and `audit_report` refuse
+        # exactly these three, and the question "which list applies?" should
+        # not have an answer.
+        self.assertEqual(
+            {"main", "master", "production"}, set(credential_proxy.GIT_PROTECTED_BRANCHES)
+        )
+
+    def test_deleting_a_remote_branch_is_refused(self):
+        for argv in (
+            ["git", "push", "origin", ":topic"],
+            ["git", "push", "--delete", "origin", "topic"],
+            ["git", "push", "-d", "origin", "topic"],
+        ):
+            with self.subTest(argv=argv):
+                violation = self.assertRefused(argv)
+                self.assertIn("deleting remote", violation.message)
+
+    def test_pushing_refs_the_command_line_does_not_name_is_refused(self):
+        for argv in (
+            ["git", "push", "--all", "origin"],
+            ["git", "push", "--mirror", "origin"],
+        ):
+            with self.subTest(argv=argv):
+                violation = self.assertRefused(argv)
+                self.assertIn("does not name", violation.message)
+
+    def test_a_push_with_no_refspec_is_refused(self):
+        violation = self.assertRefused(["git", "push"])
+        self.assertIn("Name it", violation.message)
+        self.assertRefused(["git", "push", "origin"])
+
+    def test_a_dry_run_lands_nowhere_and_is_allowed(self):
+        # The way to find out what a push would do without tripping the gate.
+        # It short-circuits every refusal, not just the protected-branch one,
+        # which is worth pinning because it is the gate's one blanket exemption.
+        self.assertAllowed(["git", "push", "--dry-run", "origin", "main"])
+        self.assertAllowed(["git", "push", "-n", "origin", "main"])
+        self.assertAllowed(["git", "push", "--dry-run", "--mirror", "origin"])
+        self.assertAllowed(["git", "push", "--dry-run", "--delete", "origin", "x"])
+        self.assertAllowed(["git", "push", "--dry-run"])
+
+    def test_every_other_git_subcommand_is_someone_elses_problem(self):
+        # The lease gate owns local-tree writes; this one owns the remote.
+        for argv in (
+            ["git", "commit", "-m", "x"],
+            ["git", "checkout", "-B", "main", "origin/main"],
+            ["git", "reset", "--hard"],
+            ["git", "status"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertAllowed(argv)
+
+    def test_a_c_redirect_does_not_hide_the_destination(self):
+        self.assertRefused(["git", "-C", "/w/clone", "push", "origin", "main"])
+
+
+class ForgePolicyConfigTest(unittest.TestCase):
+    """Modes, the policy document, and the environment override."""
+
+    def test_the_default_is_enforce(self):
+        self.assertTrue(ForgePolicy().enforcing)
+
+    def test_an_absent_forge_key_still_enforces(self):
+        # The one place this differs from the kubectl gate, on purpose: an old
+        # ConfigMap against a new image starts refusing `gh pr merge`.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(ForgePolicy.from_payload({}).enforcing)
+
+    def test_off_answers_nothing(self):
+        policy = ForgePolicy(mode="off")
+        self.assertIsNone(policy.violation(["gh", "pr", "merge", "7"]))
+        self.assertIsNone(policy.violation(["git", "push", "origin", "main"]))
+
+    def test_warn_still_answers_but_does_not_enforce(self):
+        policy = ForgePolicy(mode="warn")
+        self.assertIsNotNone(policy.violation(["gh", "pr", "merge", "7"]))
+        self.assertFalse(policy.enforcing)
+
+    def test_an_unknown_mode_is_a_configuration_error(self):
+        with self.assertRaises(ValueError):
+            ForgePolicy(mode="audit")
+
+    def test_the_environment_overrides_the_document(self):
+        with mock.patch.dict(
+            os.environ, {"CREDENTIAL_PROXY_FORGE_MODE": "off"}, clear=True
+        ):
+            self.assertEqual(
+                "off", ForgePolicy.from_payload({"forge": {"mode": "enforce"}}).mode
+            )
+
+    def test_allowed_commands_replaces_rather_than_extends(self):
+        # Worth a test because it is the opposite of what "allowedCommands"
+        # sounds like, and getting it wrong locks every skill out of `gh`.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            policy = ForgePolicy.from_payload(
+                {"forge": {"allowedCommands": ["pr merge"]}}
+            )
+        self.assertIsNone(policy.violation(["gh", "pr", "merge", "7"]))
+        self.assertIsNotNone(policy.violation(["gh", "pr", "create"]))
+
+    def test_protected_branches_takes_patterns(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            policy = ForgePolicy.from_payload(
+                {"forge": {"protectedBranches": ["release-*"]}}
+            )
+        self.assertIsNotNone(policy.violation(["git", "push", "origin", "release-29"]))
+        # And replaces the default pair, which is the same trap as above.
+        self.assertIsNone(policy.violation(["git", "push", "origin", "main"]))
+
+    def test_a_non_object_forge_key_is_a_configuration_error(self):
+        with self.assertRaises(ValueError):
+            ForgePolicy.from_payload({"forge": ["enforce"]})
+
+    def test_a_policy_built_in_code_behaves_like_one_loaded_from_a_file(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            policy = Policy(rules=[], blocked_message="blocked")
+        self.assertTrue(policy.forge.enforcing)
+
+
+class ForgeGateWiringTest(unittest.TestCase):
+    """The gate as the agent meets it — over HTTP, through /v1/exec."""
+
+    def start(self, forge, kubernetes=None):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        policy_path = Path(self.temp_dir.name) / "policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "blockedMessage": "blocked",
+                    "rules": [],
+                    "forge": forge,
+                    "kubernetes": kubernetes or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        CredentialProxyHandler.policy = Policy.load(str(policy_path))
+        executor = CommandExecutor(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            state_dir=str(Path(self.temp_dir.name) / "state"),
+        )
+        fake_bin = Path(self.temp_dir.name) / "fake-bin"
+        fake_bin.mkdir()
+        stub = fake_bin / "gh"
+        stub.write_text("#!/bin/sh\necho ran \"$@\"\n", encoding="utf-8")
+        stub.chmod(0o755)
+        executor.executables["gh"] = str(stub)
+        CredentialProxyHandler.executor = executor
+        CredentialProxyHandler.max_request_bytes = 65536
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), CredentialProxyHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def post(self, payload):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.server.server_port}/v1/exec",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    def test_a_merge_comes_back_with_the_shared_refusal_contract(self):
+        self.start({"mode": "enforce"})
+        status, body = self.post({"argv": ["gh", "pr", "merge", "7", "--squash"]})
+        self.assertEqual(403, status)
+        self.assertEqual("blocked", body["status"])
+        self.assertEqual("SECURITY_POLICY_BLOCKED", body["code"])
+        self.assertEqual("github.write-path", body["rule"])
+
+    def test_opening_a_pull_request_reaches_the_executor(self):
+        self.start({"mode": "enforce"})
+        status, body = self.post(
+            {"argv": ["gh", "pr", "create", "--title", "t", "--body", "b"]}
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("completed", body["status"])
+        self.assertIn("ran pr create", body["stdout"])
+
+    def test_warn_mode_runs_the_merge_and_logs_what_enforce_would_refuse(self):
+        self.start({"mode": "warn"})
+        with self.assertLogs("credential-proxy", level="WARNING") as logs:
+            status, body = self.post({"argv": ["gh", "pr", "merge", "7"]})
+        self.assertEqual(200, status)
+        self.assertIn("ran pr merge 7", body["stdout"])
+        self.assertTrue(
+            any("would_refuse" in line for line in logs.output),
+            f"no would_refuse line in {logs.output}",
+        )
+
+    def test_a_push_to_main_is_refused_for_its_destination_not_its_lease(self):
+        # Ordering guard. This cwd holds no lease either, so if the forge gate
+        # ran after the lease gate the refusal would name the wrong reason and
+        # the agent would go looking for a workspace instead of a branch.
+        self.start({"mode": "enforce"})
+        workspace = CredentialProxyHandler.executor.workspace_dir
+        status, body = self.post(
+            {"argv": ["git", "push", "origin", "main"], "cwd": str(workspace)}
+        )
+        self.assertEqual(403, status)
+        self.assertEqual("git.push-target", body["rule"])
+
+    def test_an_allowed_push_still_has_to_hold_a_lease(self):
+        # The converse: letting a push through this gate must not let it past
+        # the next one.
+        self.start({"mode": "enforce"})
+        workspace = CredentialProxyHandler.executor.workspace_dir
+        status, body = self.post(
+            {"argv": ["git", "push", "origin", "topic"], "cwd": str(workspace)}
+        )
+        self.assertEqual(403, status)
+        self.assertEqual("git.workspace.lease", body["rule"])
+
+    def test_the_gate_does_not_stand_between_kubectl_and_its_own_check(self):
+        self.start({"mode": "enforce"}, kubernetes={"mode": "enforce"})
+        status, body = self.post({"argv": ["kubectl", "delete", "pod", "web"]})
+        self.assertEqual(403, status)
+        self.assertEqual("kubernetes.readonly", body["rule"])
 
 
 class CommandExecutorTest(unittest.TestCase):

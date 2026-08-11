@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import fnmatch
 import hmac
 import http.client
 import io
@@ -970,6 +971,7 @@ class Policy:
         rules: list[Rule],
         blocked_message: str,
         kubernetes: KubernetesPolicy | None = None,
+        forge: ForgePolicy | None = None,
     ) -> None:
         self.rules = rules
         self.blocked_message = blocked_message
@@ -979,6 +981,7 @@ class Policy:
         self.kubernetes = (
             KubernetesPolicy.from_payload({}) if kubernetes is None else kubernetes
         )
+        self.forge = ForgePolicy.from_payload({}) if forge is None else forge
 
     @classmethod
     def load(cls, path: str) -> "Policy":
@@ -999,6 +1002,7 @@ class Policy:
             rules=rules,
             blocked_message=blocked_message,
             kubernetes=KubernetesPolicy.from_payload(payload),
+            forge=ForgePolicy.from_payload(payload),
         )
 
     def blocked_by(self, argv: list[str]) -> Rule | None:
@@ -1169,20 +1173,25 @@ _GIT_GLOBAL_WITH_VALUE = frozenset(
 )
 
 
-def _git_plan(argv: list[str]) -> tuple[str | None, list[str]]:
-    """The subcommand in `argv`, plus every directory its `-C` flags select.
+def _git_plan(argv: list[str]) -> tuple[str | None, list[str], int]:
+    """The subcommand in `argv`, every directory its `-C` flags select, and where it sat.
 
     `-C` is returned rather than ignored because git applies it cumulatively
     before running the subcommand: `git -C /elsewhere commit` executes nowhere
     near the working directory the caller reported, so a containment check that
     only looked at `cwd` would be checking the wrong path.
+
+    The index is returned so a caller that has to keep reading past the
+    subcommand — `_git_push_plan` does, to find the refspecs — does not have to
+    repeat this scan and risk disagreeing with it about which token the
+    subcommand was.
     """
     directories: list[str] = []
     index = 1
     while index < len(argv):
         token = argv[index]
         if not token.startswith("-"):
-            return token, directories
+            return token, directories, index
         name, sep, inline = token.partition("=")
         if name == "-C":
             if sep:
@@ -1192,7 +1201,518 @@ def _git_plan(argv: list[str]) -> tuple[str | None, list[str]]:
         if name in _GIT_GLOBAL_WITH_VALUE and not sep:
             index += 1
         index += 1
-    return None, directories
+    return None, directories, len(argv)
+
+
+# ------------------------------------------------------------------------------
+# The forge gate: branch and pull request, and nothing else
+# ------------------------------------------------------------------------------
+#
+# The agent holds a repository-scoped GitHub App installation token, minted by
+# Minty and cached into `gh` and the git credential store by
+# `github_token_refresh.py`. Everything that token can do, the agent can do —
+# and an installation token with `contents: write` and `pull_requests: write`
+# can merge its own pull request, force-push over `main`, delete a branch and
+# approve a review. The persona says the agent proposes changes rather than
+# making them. Nothing until now made that true.
+#
+# `GIT_MUTATING_SUBCOMMANDS` above is about the local filesystem: it stops one
+# agent trampling another's working tree. A push that is perfectly well-behaved
+# inside its own lease can still land on `main`. This gate is about the remote,
+# and it asks a different question of each tool.
+#
+# For `gh`: which command is this? An allowlist, for the same reason
+# `KUBECTL_READ_VERBS` is one rather than the reason `GIT_MUTATING_SUBCOMMANDS`
+# is not. `gh`'s surface grows with every release — `ruleset`, `cache`,
+# `attestation` and `org` all arrived after this repository was started — and a
+# subcommand nobody has classified should fail closed rather than inherit "not
+# on the denylist" as permission.
+#
+# For `git push`: where does it land? Not an allowlist of verbs; `push` is the
+# only remote-write verb git has, so refusing it would refuse the entire point.
+# The check is on the destination refspec instead.
+#
+# Force is deliberately not refused. `submit_suggestion.push_branch` explains at
+# length why it pushes `--force-with-lease`: a pull request that comes back for
+# another round of review has to update the branch it already points at. What
+# makes a force dangerous at fleet scale is where it lands, and that is what is
+# checked here.
+
+# `gh` commands the agent may run, as space-joined prefixes matched the same way
+# `KUBECTL_READ_VERBS` matches: an entry with a space is a two-token prefix, so
+# a command with both a read and a write half can be allowed by half.
+#
+# The write half of this set is the branch-and-pull-request path and nothing
+# else. What is deliberately absent is worth stating, because each omission is a
+# decision rather than an oversight:
+#
+#   * `pr merge` — the whole point. A proposal the proposer can accept is not a
+#     proposal.
+#   * `pr review` — self-approval is merging with extra steps on any repository
+#     whose branch protection counts approvals.
+#   * `pr checkout` — a working-tree write that would go around the lease gate,
+#     which only knows how to read `git` argv.
+#   * `repo` beyond `view` — delete, rename, archive, edit and `set-default`
+#     are repository administration; `fork` and `clone` are `git clone`'s job,
+#     inside a lease.
+#   * `workflow run|enable|disable` and `run rerun|cancel|delete` — dispatching
+#     CI is arbitrary code execution wearing a different hat. This repository's
+#     App is not scoped for it today (`actions: write` is not among the three
+#     permissions in `config/integrations/github/configmap.yaml.template`), so
+#     the refusal costs nothing now and is here for the install that widens the
+#     scope without revisiting this file.
+#   * `secret`, `variable`, `ssh-key`, `gpg-key`, `auth` beyond `status`,
+#     `extension`, `alias`, `config` — credential and tool self-modification,
+#     already half-covered by the regex rules in the policy document and covered
+#     properly here. `secret` is in the same position as `workflow run`: the App
+#     has no `secrets: write` today either.
+#
+# Matching is on the literal argv, so a `gh` alias is refused whether or not it
+# expands to something allowed — including the built-in `co` for `pr checkout`,
+# which is refused twice over. Resolving aliases would mean reading `gh`'s
+# config, and this gate deliberately decides from the command line alone.
+#
+# `label create` is the one repository-configuration write in the set, and it is
+# here because two shipped skills open with it: `audit_report.ensure_labels` and
+# `resolver.ensure_labels_exist` both create the status labels they are about to
+# apply. Creating a label the agent then puts on its own issue is part of the
+# proposal, not administration of the repository.
+GH_ALLOWED_COMMANDS = frozenset(
+    {
+        "api",
+        "auth status",
+        "issue close", "issue comment", "issue create", "issue edit",
+        "issue list", "issue reopen", "issue status", "issue view",
+        "label create", "label list",
+        "pr checks", "pr close", "pr comment", "pr create", "pr diff",
+        "pr edit", "pr list", "pr ready", "pr reopen", "pr status", "pr view",
+        "release list", "release view",
+        "repo view",
+        "run list", "run view",
+        "search",
+        "status",
+        "version",
+        "workflow list", "workflow view",
+    }
+)
+
+# Branches a push may not land on, as `fnmatch` patterns matched case-folded
+# against the ref with `refs/heads/` stripped. Deliberately the same three names
+# as `submit_suggestion.PROTECTED_BRANCHES` and `audit_report.PROTECTED_BRANCHES`,
+# which have refused these targets at the skill layer for as long as the skills
+# have existed: `main` and `master` are the GitOps rollout branches and
+# `production` is the convention some fleets use instead. Two layers refusing
+# different lists would be worse than either — the question "which one applies?"
+# has no useful answer. What the proxy adds is that the agent cannot get past it
+# by running `git` itself instead of the skill.
+GIT_PROTECTED_BRANCHES = ("main", "master", "production")
+
+# `gh`'s own options, split by whether they consume the next argument, so the
+# command scan does not read a flag's value as the command. Same hazard and
+# same treatment as `_KUBECTL_GLOBAL_WITH_VALUE` and `_GIT_GLOBAL_WITH_VALUE`.
+_GH_GLOBAL_WITH_VALUE = frozenset({"-R", "--repo", "--hostname"})
+
+# Derived, not restated, for the reason `_KUBECTL_COMPOUND_VERBS` is derived:
+# adding `pr merge` to the allowlist in config must not leave the parser
+# reading `gh pr merge` as bare `gh pr`.
+_GH_COMPOUND_COMMANDS = frozenset(
+    command.split(" ", 1)[0] for command in GH_ALLOWED_COMMANDS if " " in command
+)
+
+# `gh api` flags that turn a GET into a POST. gh's own rule, not a policy
+# choice: any `--field`/`--raw-field`/`--input` switches the default method, so
+# `gh api repos/o/r/issues -f title=x` files an issue while looking like a read.
+# Scoped to `api` on purpose — `-F` means `--body-file` to `gh issue comment`.
+_GH_API_FIELD_FLAGS = frozenset({"-f", "--raw-field", "-F", "--field", "--input"})
+_GH_API_READ_METHODS = frozenset({"GET", "HEAD"})
+
+# `git push` options that consume the next argument. `--force-with-lease` is
+# absent because its value is only ever `=`-attached; taking the following token
+# would swallow the remote.
+_GIT_PUSH_WITH_VALUE = frozenset(
+    {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
+)
+_GIT_PUSH_DELETE_FLAGS = frozenset({"-d", "--delete"})
+_GIT_PUSH_DRY_RUN_FLAGS = frozenset({"-n", "--dry-run"})
+
+# Flags that push refs the argv never names. `--all` pushes every local branch,
+# which on a workspace that ran `checkout -B` from `origin/main` includes `main`;
+# `--mirror` does that and deletes every remote ref with no local counterpart.
+# Neither can be checked against a destination, because neither states one.
+_GIT_PUSH_BROADCAST_FLAGS = frozenset({"--all", "--mirror"})
+
+
+@dataclass(frozen=True)
+class GhPlan:
+    """What a `gh` argv asks for, as far as the gate needs to know."""
+
+    command: str | None
+    display: str
+    api_method: str | None
+    api_fields: bool
+    api_endpoint: str | None
+
+
+def _gh_plan(argv: list[str]) -> GhPlan:
+    """Read the command out of a `gh` argv, plus what `gh api` would do with it.
+
+    `command` is what the allowlist is matched against; `display` is the first
+    two operands whether or not the first is a compound. They differ so that a
+    refusal can name what was actually run: `gh secret set` is refused on
+    `secret`, but reporting it as "`gh secret` is not allowed" invites the reply
+    that `gh secret list` is harmless, which is true and beside the point.
+    """
+    operands: list[str] = []
+    method: str | None = None
+    fields = False
+
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if not token.startswith("-"):
+            # Every operand is walked past, but only the first two are kept:
+            # the scan cannot stop at the command, because `gh api <endpoint>
+            # -X DELETE` puts the flag that decides the verdict after it.
+            if len(operands) < 2:
+                operands.append(token)
+            index += 1
+            continue
+        name, sep, inline = token.partition("=")
+        if name in _GH_API_FIELD_FLAGS:
+            fields = True
+        if name in {"-X", "--method"}:
+            if sep:
+                method = inline
+            elif index + 1 < len(argv):
+                method = argv[index + 1]
+        if (
+            name in _GH_GLOBAL_WITH_VALUE
+            or name in _GH_API_FIELD_FLAGS
+            or name in {"-X", "--method"}
+        ) and not sep:
+            index += 1
+        index += 1
+
+    if not operands:
+        return GhPlan(
+            command=None,
+            display="",
+            api_method=method,
+            api_fields=fields,
+            api_endpoint=None,
+        )
+
+    command = operands[0]
+    if command in _GH_COMPOUND_COMMANDS and len(operands) > 1:
+        command = " ".join(operands[:2])
+    return GhPlan(
+        command=command,
+        display=" ".join(operands),
+        api_method=method,
+        api_fields=fields,
+        api_endpoint=operands[1] if operands[0] == "api" and len(operands) > 1 else None,
+    )
+
+
+@dataclass(frozen=True)
+class GitPushPlan:
+    """Where a `git push` argv would land, as far as the gate needs to know."""
+
+    destinations: tuple[str, ...]
+    deletions: tuple[str, ...]
+    broadcast_flags: tuple[str, ...]
+    dry_run: bool
+
+
+def _normalise_ref(ref: str) -> str:
+    """`+refs/heads/main` and `main` are the same destination; say so once."""
+    ref = ref.lstrip("+")
+    for prefix in ("refs/heads/",):
+        if ref.startswith(prefix):
+            return ref[len(prefix) :]
+    return ref
+
+
+def _git_push_plan(argv: list[str]) -> GitPushPlan | None:
+    """Read the destinations out of a `git push` argv, or None if it is not one.
+
+    The first operand after `push` is the repository and every operand after
+    that is a refspec, which is why the remote is skipped rather than examined:
+    a push is dangerous because of the ref it moves, not the remote it moves it
+    on, and the remote may be a URL that names no ref at all.
+
+    A refspec's destination is the half after the colon, or the whole thing when
+    there is no colon — `git push origin topic` means `topic:topic`. An empty
+    source half is a deletion: `git push origin :main` removes `main`, which is
+    the same argv shape as pushing to it with one character missing.
+
+    `--repo=<remote>` supplies the repository in place of the operand, so with it
+    every operand is a refspec and none of them is the remote. Nothing shipped
+    uses that form, but skipping an operand that is really a refspec would read
+    `git push --repo=origin main` as a push with no refspec at all.
+    """
+    subcommand, _, index = _git_plan(argv)
+    if subcommand != "push":
+        return None
+
+    operands: list[str] = []
+    deletion_flag = False
+    dry_run = False
+    broadcast: list[str] = []
+    remote_in_flag = False
+
+    index += 1
+    while index < len(argv):
+        token = argv[index]
+        if not token.startswith("-"):
+            operands.append(token)
+            index += 1
+            continue
+        name, sep, _ = token.partition("=")
+        if name in _GIT_PUSH_DELETE_FLAGS:
+            deletion_flag = True
+        if name in _GIT_PUSH_DRY_RUN_FLAGS:
+            dry_run = True
+        if name in _GIT_PUSH_BROADCAST_FLAGS:
+            broadcast.append(name)
+        if name == "--repo":
+            remote_in_flag = True
+        if name in _GIT_PUSH_WITH_VALUE and not sep:
+            index += 1
+        index += 1
+
+    destinations: list[str] = []
+    deletions: list[str] = []
+    for refspec in operands if remote_in_flag else operands[1:]:
+        source, separator, target = refspec.partition(":")
+        if not separator:
+            source, target = refspec, refspec
+        if deletion_flag or (separator and not source):
+            deletions.append(_normalise_ref(target or source))
+        else:
+            destinations.append(_normalise_ref(target))
+
+    return GitPushPlan(
+        destinations=tuple(destinations),
+        deletions=tuple(deletions),
+        broadcast_flags=tuple(dict.fromkeys(broadcast)),
+        dry_run=dry_run,
+    )
+
+
+@dataclass(frozen=True)
+class ForgeViolation:
+    """A refusal, carrying the rule id the response should name."""
+
+    rule_id: str
+    message: str
+
+
+class ForgePolicy:
+    """The branch-and-pull-request gate, and whether it bites or only reports.
+
+    Shares `KubernetesPolicy`'s three modes and its reasoning about them: `warn`
+    runs the command and logs what `enforce` would have refused, so "is this
+    safe to enforce?" becomes a question the sidecar logs answer rather than one
+    the first false positive answers by getting the gate switched off.
+
+    Unlike that gate, this one ships enforcing. The difference is what the
+    survey found. kubectl's allowlist collides with a large share of the skill
+    catalogue, because the catalogue is full of instructions to apply, patch and
+    cordon. This one collides with nothing that reaches it. Every `gh` call in
+    shipped code — `audit_report`, `resolver`, `submit_suggestion` — is a list,
+    view, create, edit, comment, close or `label create`, and every `git push`
+    names its branch (`push --force-with-lease origin <branch>` in
+    `submit_suggestion`, `push -f origin <branch>` in `audit_report`). A gate
+    that refuses nothing anybody does is a gate that can start refusing.
+
+    The one apparent collision is `github_token_refresh.refresh_git_credentials`,
+    which runs `gh auth login --with-token` and `gh auth setup-git` — both
+    refused here, and both unreachable from the agent. When
+    `CREDENTIAL_PROXY_URL` is set, which it is in the agent container, that
+    function POSTs to `/v1/github/refresh` and returns before it gets there; the
+    `gh` calls run in the sidecar, where the handler executes the script
+    directly rather than through `/v1/exec`. The `gcloud auth
+    print-identity-token` two lines above them proves the path is exempt
+    already: the `gcp.access-token-disclosure` rule would refuse it otherwise.
+
+    Two refusals are worth knowing about before they are met:
+
+    * **`git push` with no refspec.** Refused, not allowed. `git push` and
+      `git push origin` land wherever `push.default` and the current branch send
+      them, and the gate cannot say where that is without reading `.git/HEAD`
+      — which would be both a departure from argv-structural checking and racy,
+      since the agent can move HEAD between the check and the push. Naming the
+      branch is one word and makes the destination checkable.
+
+    * **`gh api graphql`.** Refused, because GraphQL is POST-only and carries
+      its query in `-f query=…`, which is indistinguishable in argv from
+      `-f title=…` on an issue. No shipped skill uses it; a read that needs it
+      should use the REST path the rest of the catalogue uses.
+
+    `allowedCommands` and `protectedBranches` in the policy document are the
+    escape hatches, with the same two caveats as `allowedVerbs`: each *replaces*
+    its default rather than extending it, and neither is reachable on an
+    operator-managed install, because `credentialProxyPolicyJSON` in
+    `k8s-operator/internal/controller/platformagent_manifests.go` carries no
+    `forge` key and the controller re-applies that ConfigMap every reconcile.
+    `CREDENTIAL_PROXY_FORGE_MODE` is reachable, which is what matters for
+    turning the gate off in a hurry.
+    """
+
+    GH_RULE_ID = "github.write-path"
+    GIT_RULE_ID = "git.push-target"
+
+    def __init__(
+        self,
+        mode: str = "enforce",
+        allowed_commands: frozenset[str] = GH_ALLOWED_COMMANDS,
+        protected_branches: tuple[str, ...] = GIT_PROTECTED_BRANCHES,
+    ) -> None:
+        if mode not in {"warn", "enforce", "off"}:
+            raise ValueError(f"forge.mode must be warn, enforce or off, not {mode!r}")
+        self.mode = mode
+        self.allowed_commands = allowed_commands
+        self.protected_branches = protected_branches
+
+    @property
+    def enforcing(self) -> bool:
+        return self.mode == "enforce"
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "ForgePolicy":
+        """Build the gate from the policy document's optional `forge` key.
+
+        An absent key means the defaults, which enforce. That is the one place
+        this differs from `KubernetesPolicy.from_payload`, where an absent key
+        means warn: an old ConfigMap against a new proxy image starts refusing
+        `gh pr merge` immediately, on purpose, because nothing in the tree runs
+        it.
+        """
+        section = payload.get("forge") or {}
+        if not isinstance(section, dict):
+            raise ValueError("policy `forge` must be an object")
+
+        mode = str(section.get("mode", "enforce")).strip().lower()
+        override = os.getenv("CREDENTIAL_PROXY_FORGE_MODE", "").strip().lower()
+        if override:
+            mode = override
+
+        commands = section.get("allowedCommands")
+        allowed = GH_ALLOWED_COMMANDS if commands is None else frozenset(commands)
+        branches = section.get("protectedBranches")
+        protected = (
+            GIT_PROTECTED_BRANCHES if branches is None else tuple(branches)
+        )
+        return cls(
+            mode=mode, allowed_commands=allowed, protected_branches=protected
+        )
+
+    def _protects(self, ref: str) -> bool:
+        # Case-folded because the skill-layer check is, and because a fleet that
+        # calls its trunk `Main` should not have to discover the difference.
+        folded = ref.lower()
+        return any(
+            fnmatch.fnmatch(folded, pattern.lower())
+            for pattern in self.protected_branches
+        )
+
+    def violation(self, argv: list[str]) -> ForgeViolation | None:
+        """Why this command is not a branch-or-pull-request write, or None if it is."""
+        if self.mode == "off" or not argv:
+            return None
+        executable = Path(argv[0]).name
+        if executable == "gh":
+            return self._gh_violation(argv)
+        if executable == "git":
+            return self._git_violation(argv)
+        return None
+
+    def _gh_violation(self, argv: list[str]) -> ForgeViolation | None:
+        plan = _gh_plan(argv)
+        if plan.command is None:
+            return None  # `gh --version` and friends run nothing against a repo.
+        if plan.command not in self.allowed_commands:
+            return ForgeViolation(
+                self.GH_RULE_ID,
+                f"`gh {plan.display}` is not on the branch-and-pull-request "
+                "path. The agent proposes changes and comments on them; it does "
+                "not merge, approve, administer a repository or dispatch CI. "
+                f"Allowed: {', '.join(sorted(self.allowed_commands))}.",
+            )
+        if plan.command != "api":
+            return None
+
+        if (plan.api_endpoint or "").strip().lower() == "graphql":
+            # Refused by name rather than left to the method and field rules
+            # below. Those catch the normal spelling, but GraphQL puts the verb
+            # inside `query=`, where nothing in the argv can see it: `-X GET -f
+            # query=mutation{...}` reads as a query parameter and passes. The
+            # endpoint has no read-only shape to allow, so there is nothing lost
+            # in refusing all of it.
+            return ForgeViolation(
+                self.GH_RULE_ID,
+                "`gh api graphql` is refused: a GraphQL mutation and a GraphQL "
+                "query are the same command line, distinguished only inside the "
+                "query text. Use the REST endpoints, which say in the argv what "
+                "they do.",
+            )
+
+        method = (plan.api_method or "").strip().upper()
+        if method and method not in _GH_API_READ_METHODS:
+            return ForgeViolation(
+                self.GH_RULE_ID,
+                f"`gh api --method {method}` is refused: `gh api` is allowed as a "
+                "read, and any other method reaches the whole GitHub API with the "
+                "agent's token, past every other rule here.",
+            )
+        if not method and plan.api_fields:
+            return ForgeViolation(
+                self.GH_RULE_ID,
+                "`gh api` with a field flag is refused: a field switches gh's "
+                "default method from GET to POST, so this writes. Add `--method "
+                "GET` if the field really is a query parameter.",
+            )
+        return None
+
+    def _git_violation(self, argv: list[str]) -> ForgeViolation | None:
+        plan = _git_push_plan(argv)
+        if plan is None or plan.dry_run:
+            return None
+
+        if plan.broadcast_flags:
+            return ForgeViolation(
+                self.GIT_RULE_ID,
+                f"`git push {' '.join(plan.broadcast_flags)}` is refused: it "
+                "pushes refs this command line does not name, which on a "
+                "workspace branched from the default branch includes that "
+                "branch. Push the one branch by name.",
+            )
+        if plan.deletions:
+            return ForgeViolation(
+                self.GIT_RULE_ID,
+                f"deleting remote {', '.join(sorted(plan.deletions))} is refused: "
+                "the agent adds branches and pull requests, and removing them is "
+                "the reviewer's decision, taken by merging or closing.",
+            )
+        protected = sorted(
+            {ref for ref in plan.destinations if self._protects(ref)}
+        )
+        if protected:
+            return ForgeViolation(
+                self.GIT_RULE_ID,
+                f"pushing to {', '.join(protected)} is refused: it is a "
+                "protected branch, and a change that lands on it directly is a "
+                "change nobody reviewed. Push a branch and open a pull request.",
+            )
+        if not plan.destinations:
+            return ForgeViolation(
+                self.GIT_RULE_ID,
+                "`git push` with no refspec is refused: where it lands depends "
+                "on the current branch and `push.default`, which this command "
+                "line does not say. Name it — `git push origin <branch>`.",
+            )
+        return None
 
 
 class CommandExecutor:
@@ -1422,7 +1942,7 @@ class CommandExecutor:
             return None
         if not argv or Path(argv[0]).name != "git":
             return None
-        subcommand, redirects = _git_plan(argv)
+        subcommand, redirects, _ = _git_plan(argv)
         if subcommand not in GIT_MUTATING_SUBCOMMANDS:
             return None
 
@@ -1844,6 +2364,36 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 kubectl_violation,
             )
 
+        # Runs before the lease check, so that `git push origin main` inside a
+        # perfectly valid lease is refused for landing on `main` rather than
+        # passing, and so that a `gh` refusal does not depend on a lease `gh`
+        # never needed.
+        forge_violation = self.policy.forge.violation(argv)
+        if forge_violation is not None:
+            if self.policy.forge.enforcing:
+                LOGGER.warning(
+                    "forge refused request_id=%s rule=%s reason=%s",
+                    request_id,
+                    forge_violation.rule_id,
+                    forge_violation.message,
+                )
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "status": "blocked",
+                        "code": "SECURITY_POLICY_BLOCKED",
+                        "rule": forge_violation.rule_id,
+                        "message": forge_violation.message,
+                    },
+                )
+                return
+            LOGGER.warning(
+                "forge would_refuse request_id=%s rule=%s reason=%s",
+                request_id,
+                forge_violation.rule_id,
+                forge_violation.message,
+            )
+
         # Not a policy rule: the policy matches on argv alone, and this refusal
         # turns on the working directory as well.
         violation = self.executor.git_lease_violation(argv, cwd)
@@ -2088,6 +2638,12 @@ def serve(args: argparse.Namespace) -> None:
         "kubectl read-only gate mode=%s namespaces=%s",
         kubernetes_policy.mode,
         ",".join(kubernetes_policy.allowed_namespaces) or "<unrestricted>",
+    )
+    forge_policy = CredentialProxyHandler.policy.forge
+    LOGGER.info(
+        "forge branch-and-pr gate mode=%s protected=%s",
+        forge_policy.mode,
+        ",".join(forge_policy.protected_branches) or "<none>",
     )
     executor = CommandExecutor(
         timeout_seconds=args.timeout_seconds,
