@@ -46,10 +46,13 @@ The security model (03) makes these enforceable; the roadmap (07) proves them wi
 
 ## The design set
 
-Two tiers, meant to be read in order **01 → 09**:
+Two tiers of specification, meant to be read in order **01 → 09**, plus a standing evaluation that
+is not part of the build sequence:
 
 - **Foundational (north star) — 01–04:** _what_ we are building and _why_.
 - **Buildable (bridging) — 05–09:** _how_ it is assembled.
+- **Evaluation — 10:** a dated verdict on an external dependency, re-reviewed on a schedule. It
+  specifies nothing and nothing is built from it.
 
 | #   | Document                                                       | Covers                                                                                                                                                                                                                                           |
 | --- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -63,9 +66,12 @@ Two tiers, meant to be read in order **01 → 09**:
 | 07  | [Implementation roadmap](07-implementation-roadmap.md)         | The phased build (current → end state), per-phase acceptance criteria, the verification loop, the definition of done, and risks                                                                                                                  |
 | 08  | [Agent runtime & identity](08-agent-runtime-and-identity.md)   | The thin kube-agents controller (the extended `k8s-operator/`) reconciling each `Agent` CR (Hermes harness) into an isolated pod with a per-pod read-only Workload-Identity SA, on Scion's per-pod model; what is deferred as hardening, and why |
 | 09  | [The runner contract](09-runner-contract.md)                   | The one interface every agent execution goes through — request and event-stream schemas, the rules a runner must obey, the conformance suite and null runner, and why Hermes conformance is a later milestone                                    |
+|     | _Specifications above · standing evaluations below_            |                                                                                                                                                                                                                                                  |
+| 10  | [AX evaluation](10-ax-evaluation.md)                           | **Not a specification.** The standing, dated answer to "should we adopt google/ax yet" — what it would replace (run durability under 09), what it still lacks, and the five trigger conditions that would change the verdict. Reviewed quarterly |
 
-Each document opens with a **TL;DR** and carries a **Goals / Non-goals** section and a
-**Verification** section of concrete, mostly-runnable checks.
+Each specification (01–09) opens with a **TL;DR** and carries a **Goals / Non-goals** section and a
+**Verification** section of concrete, mostly-runnable checks. The evaluation (10) has a TL;DR and a
+Verification section but no Goals / Non-goals — it specifies nothing to have goals about.
 
 ---
 

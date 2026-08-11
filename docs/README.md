@@ -14,7 +14,7 @@ editing any doc.
 
 ## 1. Directory overview
 
-The repository tracks **205** `.md`/`.mdx` documents outside the root-level
+The repository tracks **206** `.md`/`.mdx` documents outside the root-level
 dot-directories — `docs-check-map` verifies this total against `git ls-files`
 and fails CI when it drifts. Dot-directories at the repository root
 (`.agents/`, `.github/`, `.claude/`) hold tooling — review skills, PR
@@ -47,7 +47,7 @@ kube-agents/
 ├── charts/                                        canonical Helm charts (kube-agents)
 ├── docs/                                          human documentation
 │   ├── README.md                                  this map
-│   ├── architecture/                              END-STATE spec set 01–09 + README
+│   ├── architecture/                              END-STATE specs 01–09, evaluation 10, README
 │   ├── designs/                                   per-feature design documents
 │   ├── contributing.md, security-requirements.md,
 │   │   credential-isolation-design.md             standalone docs
@@ -142,9 +142,13 @@ Not every document describes the same thing. When checking a doc against the
 code, first check which era it belongs to:
 
 - **`docs/architecture/` (01–09 + README) describes the END-STATE target, not
-  what ships.** Each file carries the banner "Specifies the end state, not
-  current behaviour." Do not treat mismatches between these specs and the code
-  as doc bugs — the delta is the roadmap (`07-implementation-roadmap.md`).
+  what ships.** Each of those files carries the banner "Specifies the end state,
+  not current behaviour." Do not treat mismatches between these specs and the
+  code as doc bugs — the delta is the roadmap (`07-implementation-roadmap.md`).
+  `10-ax-evaluation.md` is the one exception in that directory: it is a dated
+  evaluation of an external project rather than a specification, it carries no
+  end-state banner, and it does describe current behaviour — so drift in it is
+  an ordinary doc bug.
 - **The site (`docs/site/src/content/docs/`) and component READMEs describe
   what ships today** on `main`. These are the docs that must track code
   changes.
@@ -219,6 +223,7 @@ row's glob matches. Paths are repository-root-relative.
 | `docs/architecture/07-implementation-roadmap.md`     | End-state spec    | Phased sequence from the current state (direct-mutation agents, `PlatformAgent` only) to the three read-only personas, with acceptance criteria per phase.                                                   | Delta table, phases, definition of done                                      | End-state; sequencing only                                                    |
 | `docs/architecture/08-agent-runtime-and-identity.md` | End-state spec    | Simplest v1 runtime: a thin controller reconciles the `Agent` CRD into one isolated Hermes pod per agent bound to one pre-created read-only service account.                                                 | Runtime, identity referencing (never minting), deferred hardening            | End-state; deliberately simplicity-over-defense-in-depth                      |
 | `docs/architecture/09-runner-contract.md`            | End-state spec    | The one interface every agent execution goes through: `run(principal, profile, task, workspace, budget)` returning an event stream, plus the schemas, conformance suite, and null runner in `runner/`.       | Request and event schemas, conformance rules, null runner, open questions    | End-state; the null runner is the only conforming implementation today        |
+| `docs/architecture/10-ax-evaluation.md`              | Evaluation        | Standing, dated verdict on adopting google/ax as an execution-plane runtime: what it would replace (run durability under 09), what it lacks, and the triggers that would change the answer.                  | AX and Agent Substrate status, adoption triggers, review log                 | Re-reviewed quarterly; verdict as of 2026-08-11 is do not adopt               |
 | `docs/designs/agent-communication.md`                | Feature design    | How the Platform Agent and per-cluster subagents exchange information: a file-based typed handover channel plus optional kanban delegation.                                                                  | Blackboard model, record envelope, `write_handover` tool                     | Design of record; NOT yet implemented (banner in file)                        |
 | `docs/designs/audit-logging-user-attribution.md`     | Feature design    | Closes the gap where audit logs identify the agent SA but not the requesting human, by carrying requester and trace/session IDs through existing telemetry.                                                  | Attribution contract per plane, correlation recipes, trust model             | Draft, P0; per-plane implemented-vs-planned split declared inline             |
 | `docs/designs/fleet-audit-issue-ledger.md`           | Feature design    | Replaces the audit's PR-as-report with one ledger issue per stream plus narrow per-finding remediation PRs; hybrid auto/pull-based gating and a first-class `recommendation` field.                          | Ledger issue, remediation PR lifecycle, promotion gating, migration          | Design of record; implemented (banner in file)                                |
