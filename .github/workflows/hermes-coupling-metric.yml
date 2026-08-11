@@ -23,6 +23,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Four of the seven counts are computed by hack/hermes_touchpoints.py, and
+      # patch-metric.sh treats a Python it cannot run as fatal rather than as a
+      # zero. Pinned to the same version python-tests.yml uses so the counts here
+      # and the tests that pin them run on one interpreter.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
       - name: Count Hermes touchpoints
         run: |
           {
@@ -33,10 +42,13 @@ jobs:
             echo "Lower is better. \`make patch-metric\` runs the same check locally and"
             echo "fails on a regression; \`hack/patch-metric.sh --update\` lowers the"
             echo "baseline once a milestone has earned it."
+            echo ""
+            echo "\`python3 hack/hermes_touchpoints.py --list\` names every touchpoint"
+            echo "behind the counts. The prose inventory is \`docs/designs/hermes-touchpoints.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Run again for the job log, and surface a regression as a notice so it
           # is visible in the checks list without turning the pull request red.
           if ! bash hack/patch-metric.sh; then
-            echo "::notice title=Hermes coupling grew::A patch set or Dockerfile patch reference was added. See the job summary; implementation.md section 0.4 says a milestone needing a new patch set is mis-designed."
+            echo "::notice title=Hermes coupling grew::A patch set, an inline Hermes source edit, a monkey patch target, a plugin importing Hermes internals, or direct access to a Hermes table was added. See the job summary; implementation.md section 0.4 says a milestone needing more Hermes coupling is mis-designed."
           fi
