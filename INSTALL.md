@@ -539,7 +539,7 @@ kubectl create secret generic platform-agent-secrets \
   --from-file=SANDBOX_SSH_PUBLIC_KEY="$KEY_DIR/id_ed25519.pub" &&
   kubectl create secret generic platform-agent-shell-authorized-keys \
     --namespace kubeagents-system \
-    --from-file=authorized_keys="$KEY_DIR/id_ed25519.pub"
+    --from-file=authorized_keys="$KEY_DIR/id_ed25519.pub" --dry-run=client -o yaml | kubectl apply -f -
 
 rm -rf "$KEY_DIR"
 ```
@@ -550,9 +550,11 @@ Secret because the sandbox mounts its `authorized_keys` from there and must not 
 `platform-agent-secrets`, which holds every model API key. The Helm chart renders
 `platform-agent-shell-authorized-keys` from the pair; nothing on this path does, so create it here.
 The name derives from the `PlatformAgent`'s `metadata.name`, which Step 6 sets to `platform-agent`.
-The two creates are chained so a Secret that already exists (`AlreadyExists`) stops the block before
+The two creates are chained so an `AlreadyExists` on `platform-agent-secrets` stops the block before
 the authorized-keys Secret is written; that error means the install predates this step, and the
-upgrade note further down this section is the path for it, not a re-run.
+upgrade note further down this section is the path for it, not a re-run. The authorized-keys create
+goes through `kubectl apply`, so a re-run after deleting `platform-agent-secrets` leaves
+`authorized_keys` matching the pair just minted rather than an earlier one.
 
 The Session KV values are generated, not chosen: `SESSION_KV_API_KEY` is the bearer token
 for the pod-local Session KV server, and `SESSION_KV_SALT` is the HMAC salt that
@@ -595,8 +597,9 @@ present is left alone, because replacing a key the sandbox trusts locks the agen
 
 ```bash
 AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
-: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
-if [ -z "$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PRIVATE_KEY}')" ] ||
+if [ -z "$AGENT_NAME" ]; then
+  echo "no PlatformAgent found in kubeagents-system" >&2
+elif [ -z "$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PRIVATE_KEY}')" ] ||
   [ -z "$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PUBLIC_KEY}')" ]; then
   KEY_DIR="$(mktemp -d)"
   ssh-keygen -q -t ed25519 -N '' -C kube-agents-shell-sandbox -f "$KEY_DIR/id_ed25519" &&
@@ -613,15 +616,16 @@ This patches `data` with base64 rather than `stringData` with the raw key becaus
 has newlines and the patch is interpolated into JSON; `tr -d '\n'` because macOS `base64` has no
 `-w0`. The steps are chained so a failed patch does not go on to create the authorized-keys Secret,
 which would clear `ShellSandboxKeysMissing` while the gateway still has no private key. If
-`platform-agent-secrets` holds the pair but `<name>-shell-authorized-keys` is missing, create it
-from the stored public half; the test refuses to create the Secret from an empty value:
+`platform-agent-secrets` holds the pair but `<name>-shell-authorized-keys` is missing, or both
+halves are present yet the agent's commands fail with `Permission denied (publickey)` (the
+authorized-keys Secret kept a public key from an earlier pair, which the operator's existence check
+cannot see), this creates or replaces it from the stored public half and runs nothing on an empty
+value; then restart as below:
 
 ```bash
-AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
-: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
-SANDBOX_PUB="$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PUBLIC_KEY}' | base64 --decode)"
-[ -n "$SANDBOX_PUB" ] && printf '%s\n' "$SANDBOX_PUB" |
-  kubectl create secret generic "${AGENT_NAME}-shell-authorized-keys" -n kubeagents-system --from-file=authorized_keys=/dev/stdin
+AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')" && [ -n "$AGENT_NAME" ] &&
+  SANDBOX_PUB="$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PUBLIC_KEY}' | base64 --decode)" && [ -n "$SANDBOX_PUB" ] &&
+  printf '%s\n' "$SANDBOX_PUB" | kubectl create secret generic "${AGENT_NAME}-shell-authorized-keys" -n kubeagents-system --from-file=authorized_keys=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 Then restart the gateway and the shell StatefulSet. For this key the restart is required, not a
@@ -632,9 +636,8 @@ pod starts. The StatefulSet restart is for a sandbox that was already running, w
 keeps the `authorized_keys` it installed at start.
 
 ```bash
-AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
-: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
-kubectl rollout restart deployment/"${AGENT_NAME}-gateway" statefulset/"${AGENT_NAME}-shell" -n kubeagents-system
+AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')" && [ -n "$AGENT_NAME" ] &&
+  kubectl rollout restart deployment/"${AGENT_NAME}-gateway" statefulset/"${AGENT_NAME}-shell" -n kubeagents-system
 ```
 
 Vertex AI needs no entry here: `MODEL_PROVIDER=vertex` authenticates with Workload Identity
