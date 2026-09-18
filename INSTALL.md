@@ -536,11 +536,10 @@ kubectl create secret generic platform-agent-secrets \
   --from-literal=SESSION_KV_API_KEY="$(openssl rand -hex 32)" \
   --from-literal=SESSION_KV_SALT="$(openssl rand -hex 32)" \
   --from-file=SANDBOX_SSH_PRIVATE_KEY="$KEY_DIR/id_ed25519" \
-  --from-file=SANDBOX_SSH_PUBLIC_KEY="$KEY_DIR/id_ed25519.pub"
-
-kubectl create secret generic platform-agent-shell-authorized-keys \
-  --namespace kubeagents-system \
-  --from-file=authorized_keys="$KEY_DIR/id_ed25519.pub"
+  --from-file=SANDBOX_SSH_PUBLIC_KEY="$KEY_DIR/id_ed25519.pub" &&
+  kubectl create secret generic platform-agent-shell-authorized-keys \
+    --namespace kubeagents-system \
+    --from-file=authorized_keys="$KEY_DIR/id_ed25519.pub"
 
 rm -rf "$KEY_DIR"
 ```
@@ -551,6 +550,9 @@ Secret because the sandbox mounts its `authorized_keys` from there and must not 
 `platform-agent-secrets`, which holds every model API key. The Helm chart renders
 `platform-agent-shell-authorized-keys` from the pair; nothing on this path does, so create it here.
 The name derives from the `PlatformAgent`'s `metadata.name`, which Step 6 sets to `platform-agent`.
+The two creates are chained so a Secret that already exists (`AlreadyExists`) stops the block before
+the authorized-keys Secret is written; that error means the install predates this step, and the
+upgrade note further down this section is the path for it, not a re-run.
 
 The Session KV values are generated, not chosen: `SESSION_KV_API_KEY` is the bearer token
 for the pod-local Session KV server, and `SESSION_KV_SALT` is the HMAC salt that
@@ -624,9 +626,10 @@ SANDBOX_PUB="$(kubectl get secret platform-agent-secrets -n kubeagents-system -o
 
 Then restart the gateway and the shell StatefulSet. For this key the restart is required, not a
 convenience: the operator does not roll the gateway for a mounted Secret, and the `sandbox-ssh-key`
-init container copies the private key out of it only at pod start. Restarting the StatefulSet while
-its pod is still in `ContainerCreating` just recreates that pod; the restart matters for a sandbox
-that was already running, which otherwise keeps the `authorized_keys` it installed at start.
+init container copies the private key out of it only at pod start. A shell pod still in
+`ContainerCreating` needs no restart: the kubelet mounts the new Secret on its next retry and the
+pod starts. The StatefulSet restart is for a sandbox that was already running, which otherwise
+keeps the `authorized_keys` it installed at start.
 
 ```bash
 AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
@@ -745,18 +748,17 @@ make deploy-github
 Submit a sample `PlatformAgent` Custom Resource to activate cluster governance (run inside `k8s-operator/`).
 The `sed` renames the CR from `platformagent` to `platform-agent`, because the operator derives
 `platform-agent-gateway`, `platform-agent-shell-0` and `platform-agent-shell-authorized-keys` from
-the CR name and those are the names this guide uses, and points
-`spec.harness.hermes.apiServerSecretRef` at the `platform-agent-secrets` / `API_SERVER_KEY` entry
-Step 2 created, because the sample names a Secret that does not exist and the gateway does not
-start with a missing SecretKeyRef. This step is for a first install. On an existing install keep
-the CR you have: the webhook admits one per cluster ("only one PlatformAgent is allowed per
-cluster"), so re-applying under a new name is refused, and the upgrade note in Step 2 derives its
-names from whichever CR exists.
+the CR name and those are the names this guide uses, and drops the sample's
+`spec.harness.hermes.apiServerSecretRef`, which names a Secret that does not exist. With the field
+absent the operator uses `platform-agent-secrets` / `API_SERVER_KEY` as an optional reference, so
+the gateway starts even before that entry exists. This step is for a first install. On an existing
+install keep the CR you have: the webhook admits one per cluster ("only one PlatformAgent is
+allowed per cluster"), so re-applying under a new name is refused, and the upgrade note in Step 2
+derives its names from whichever CR exists.
 
 ```bash
 sed -e 's/^  name: platformagent$/  name: platform-agent/' \
-    -e 's/name: "platformagent-secrets"/name: "platform-agent-secrets"/' \
-    -e 's/key: "api-key"/key: "API_SERVER_KEY"/' \
+    -e '/^      apiServerSecretRef:$/,/^        key: "api-key"$/d' \
     examples/platformagent.yaml | kubectl apply -f -
 kubectl get platformagents -A
 ```
