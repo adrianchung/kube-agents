@@ -203,7 +203,7 @@ Before beginning installation, ensure your environment meets the requirements fo
 | **Kubernetes Cluster**          | `1.29+` (`1.35+` for `AgentPlugin` OCI volumes) | `kubectl version`                  | Target Kubernetes or GKE cluster (`AgentPlugin` OCI volumes require K8s 1.35+ `ImageVolume` gate).                                                                                                                     | **All Methods**                                  |
 | **`gcloud beta` component**     | Standard                                        | `gcloud beta --help`               | Required when adopting an existing unencrypted cluster for CMEK (`gcloud beta services identity create`) or purging backup plans during teardown (`gcloud beta container backup-restore`).                             | **Optional (CMEK / Backup Plan lifecycle)**      |
 | **gettext (`envsubst`)**        | Standard                                        | `envsubst --version`               | Template substitution in development Kustomize deployment targets (`make -C k8s-operator deploy-*`).                                                                                                                   | **Method 2 only**                                |
-| **OpenSSH (`ssh-keygen`)**      | Standard                                        | `ssh -V`                           | Mints the shell sandbox SSH keypair in Method 2 Step 2; `install.sh`, Terraform and `upgrade.sh` mint it for the other methods.                                                                                        | **Method 2 only**                                |
+| **OpenSSH (`ssh-keygen`)**      | Standard                                        | `ssh -V`                           | Mints the shell sandbox SSH keypair in Method 2 Step 2 and in `upgrade.sh`'s backfill; `install.sh` and the Terraform composition mint it without it (`tls_private_key`).                                              | **Method 2 and `upgrade.sh`**                    |
 | **Go**                          | `1.27+`; `1.21+` for the PEM import             | `go version`                       | Required for bootstrapping development tooling (`controller-gen`, `kustomize`), running tests, building operator binaries, or importing a GitHub App private key (`.pem`) into Cloud KMS via `install.sh` / Minty CLI. | **Methods 2 & 3, or Method 0/1 with PEM import** |
 | **Docker / Podman**             | `20.10+`                                        | `docker --version`                 | Required when building operator or agent container images locally (`make docker-build`, `make dev-rebuild-agent`).                                                                                                     | **Methods 2 & 3 only**                           |
 
@@ -593,6 +593,7 @@ present is left alone, because replacing a key the sandbox trusts locks the agen
 
 ```bash
 AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
+: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
 if [ -z "$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PRIVATE_KEY}')" ] ||
   [ -z "$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PUBLIC_KEY}')" ]; then
   KEY_DIR="$(mktemp -d)"
@@ -615,6 +616,7 @@ from the stored public half; the test refuses to create the Secret from an empty
 
 ```bash
 AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
+: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
 SANDBOX_PUB="$(kubectl get secret platform-agent-secrets -n kubeagents-system -o jsonpath='{.data.SANDBOX_SSH_PUBLIC_KEY}' | base64 --decode)"
 [ -n "$SANDBOX_PUB" ] && printf '%s\n' "$SANDBOX_PUB" |
   kubectl create secret generic "${AGENT_NAME}-shell-authorized-keys" -n kubeagents-system --from-file=authorized_keys=/dev/stdin
@@ -622,12 +624,13 @@ SANDBOX_PUB="$(kubectl get secret platform-agent-secrets -n kubeagents-system -o
 
 Then restart the gateway and the shell StatefulSet. For this key the restart is required, not a
 convenience: the operator does not roll the gateway for a mounted Secret, and the `sandbox-ssh-key`
-init container copies the private key out of it only at pod start. The shell pod restart is a no-op
-while it is stuck in `ContainerCreating` (it starts by itself once `<name>-shell-authorized-keys`
-exists), and is what makes a sandbox that was already running pick up a replaced `authorized_keys`.
+init container copies the private key out of it only at pod start. Restarting the StatefulSet while
+its pod is still in `ContainerCreating` just recreates that pod; the restart matters for a sandbox
+that was already running, which otherwise keeps the `authorized_keys` it installed at start.
 
 ```bash
 AGENT_NAME="$(kubectl get platformagents -n kubeagents-system -o jsonpath='{.items[0].metadata.name}')"
+: "${AGENT_NAME:?no PlatformAgent found in kubeagents-system}"
 kubectl rollout restart deployment/"${AGENT_NAME}-gateway" statefulset/"${AGENT_NAME}-shell" -n kubeagents-system
 ```
 
@@ -745,7 +748,10 @@ The `sed` renames the CR from `platformagent` to `platform-agent`, because the o
 the CR name and those are the names this guide uses, and points
 `spec.harness.hermes.apiServerSecretRef` at the `platform-agent-secrets` / `API_SERVER_KEY` entry
 Step 2 created, because the sample names a Secret that does not exist and the gateway does not
-start with a missing SecretKeyRef.
+start with a missing SecretKeyRef. This step is for a first install. On an existing install keep
+the CR you have: the webhook admits one per cluster ("only one PlatformAgent is allowed per
+cluster"), so re-applying under a new name is refused, and the upgrade note in Step 2 derives its
+names from whichever CR exists.
 
 ```bash
 sed -e 's/^  name: platformagent$/  name: platform-agent/' \
