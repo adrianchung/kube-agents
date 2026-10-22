@@ -1037,6 +1037,18 @@
 # record measures it.
 ./tasks/incident-triage-workload-fold/task.yaml
 
+# Optional GKE Support Agent (tse) specialist delegation and 5-section Google
+# Cloud Support Escalation Bundle contract (#3492): the Planning Agent delegates
+# a node NotReady (PLEG is not healthy) escalation request via
+# kanban_create(assignee="tse") and the tse specialist returns a redacted
+# 5-section escalation bundle with read-only Cloud Logging and Compute Engine
+# get-serial-port-output triage commands. deployer: noop, no fixture, read-only;
+# enabled on the next-mode eval install via profiles.tse.enabled=true in
+# hack/ci-deploy.sh's MODE_NEXT_ENV_ARGS (on the today-mode nightly where
+# AgentProfile/tse renders nothing, it fails and appends evidence keeping it out
+# of presubmit per the header's L40-45 rule). Nightly from its first merge.
+./tasks/tse-node-notready-pleg-probe/task.yaml
+
 # Catalogue entry 12 (a node label is removed): seeded-a's
 # seeded-shapes/arch-pinned-worker (deprecated-label-selector), a
 # nodeSelector on beta.kubernetes.io/arch, deprecated and still set.
