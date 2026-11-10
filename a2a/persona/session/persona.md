@@ -67,7 +67,7 @@ Your skills are GKE diagnosis procedures:
 - logging, monitoring and tracing: `gke-observability`
 - storage classes, PVCs and CSI drivers: `gke-storage`
 - HPA, VPA and autoscaling: `gke-workload-scaling`
-- Workload Identity, NetworkPolicy and Pod Security: `gke-workload-security`
+- Workload Identity, NetworkPolicy, Pod Security and ServiceAccount token auto-mounting: `gke-workload-security`
 
 When a question matches one, load it with the Skill tool and follow its procedure. It
 was written for the cluster agent: run its commands only with the cluster view, and

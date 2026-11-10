@@ -1,13 +1,13 @@
 ---
 name: gke-workload-security
-description: Workflows for auditing and hardening the security of GKE workloads.
+description: Workflows for auditing and hardening the security of GKE workloads, including NetworkPolicy, Pod Security Standards, GKE Sandbox, Secret Manager CSI, and unused ServiceAccount token auto-mounting.
 ---
 
 # GKE Workload Security
 
 This skill provides workflows and best practices for securing GKE workloads. It
 covers security auditing, Identity and Access Management (Workload Identity),
-Network Security (Network Policies), and Node Security.
+Network Security (Network Policies), ServiceAccount token auto-mounting, and Node Security.
 
 > You are read-only: each change below is a proposal you report with your findings, never a command you run.
 
@@ -231,6 +231,22 @@ spec:
 
 This will log connection details to Cloud Logging.
 
+### 9. Audit Unused ServiceAccount Token Auto-Mounting
+
+Recommend `automountServiceAccountToken: false` on a workload's pod template only after all four read-only pre-flight checks pass. Do not `exec` into pods to read live tokens.
+
+```bash
+kubectl -n <namespace> get deployments,statefulsets,daemonsets,jobs,cronjobs,pods,serviceaccounts,rolebindings -o json
+kubectl get clusterrolebindings -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.roleRef.name}{"\t"}{.subjects}{"\n"}{end}'
+```
+
+1. **Declared ServiceAccount:** Confirm `serviceAccountName` (defaulting to `default` when omitted) exists in `<namespace>` and neither the pod template nor the `ServiceAccount` already sets `automountServiceAccountToken: false`.
+2. **Zero RBAC grants:** Confirm zero `RoleBindings` in `<namespace>` (an omitted subject `namespace` applies to the binding's own namespace) and zero `ClusterRoleBindings` name the `ServiceAccount`, and no binding other than `system:basic-user`, `system:discovery`, `system:public-info-viewer`, and `system:service-account-issuer-discovery` grants `Group` `system:authenticated`, `system:serviceaccounts`, or `system:serviceaccounts:<namespace>`.
+3. **Zero Workload Identity or Vault injector annotations:** Exclude any workload whose `ServiceAccount` carries `iam.gke.io/gcp-service-account` or whose pod template sets `vault.hashicorp.com/agent-inject` to `"true"`, `"True"`, `"TRUE"`, `"t"`, `"T"`, or `"1"`.
+4. **No explicit `/var/run/secrets/kubernetes.io/serviceaccount` mount:** Exclude any workload whose pod template (`containers`, `initContainers`, `ephemeralContainers`, or non-`kube-api-access-*` mount on an unowned `Pod`) mounts `/var/run/secrets/kubernetes.io/serviceaccount` or a subpath beneath it.
+
+Propose setting `spec.template.spec.automountServiceAccountToken: false` (or `spec.jobTemplate.spec.template.spec.automountServiceAccountToken: false` on a `CronJob`) only on workloads that pass all four checks, and state the exclusion reason for every other workload.
+
 ## Best Practices
 
 1. **Least Privilege:** Always use Workload Identity with minimal IAM roles. Avoid using Node default service accounts.
@@ -239,3 +255,4 @@ This will log connection details to Cloud Logging.
 4. **Secret Management**: Use Secret Manager CSI driver instead of default Kubernetes secrets for sensitive data.
 5. **Pod Security**: Enforce `baseline` or `restricted` Pod Security Standards on all non-system namespaces.
 6. **Policy Enforcement**: Consider using **Policy Controller** (Gatekeeper) to enforce custom security and compliance policies across the cluster.
+7. **ServiceAccount Token Hygiene**: Recommend `automountServiceAccountToken: false` on pod templates only after confirming zero RBAC bindings, zero `iam.gke.io/gcp-service-account` or Vault injector annotations, and no explicit `/var/run/secrets/kubernetes.io/serviceaccount` container mount.

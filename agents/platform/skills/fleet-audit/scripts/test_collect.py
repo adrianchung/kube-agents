@@ -6557,6 +6557,65 @@ class TestUnboundSaAutomount(unittest.TestCase):
         )
         self.assertEqual(len(collect.check_unbound_sa_automount(ctx)), 1)
 
+    def test_a_workload_identity_annotated_sa_is_not_flagged(self):
+        sa = self.sa("api-sa")
+        sa["metadata"]["annotations"] = {
+            "iam.gke.io/gcp-service-account": "api@acme-prod.iam.gserviceaccount.com"
+        }
+        self.assertEqual(collect.check_unbound_sa_automount(self.ctx(serviceaccounts=[sa])), [])
+
+    def test_a_blank_workload_identity_annotation_still_flags_it(self):
+        sa = self.sa("api-sa")
+        sa["metadata"]["annotations"] = {"iam.gke.io/gcp-service-account": "   "}
+        self.assertEqual(len(collect.check_unbound_sa_automount(self.ctx(serviceaccounts=[sa]))), 1)
+
+    def test_explicit_default_sa_token_mount_in_any_container_list_suppresses_it(self):
+        for field in ("containers", "initContainers", "ephemeralContainers"):
+            for mount_path in (
+                "/var/run/secrets/kubernetes.io/serviceaccount",
+                "/var/run/secrets/kubernetes.io/serviceaccount/",
+                "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            ):
+                with self.subTest(field=field, mount_path=mount_path):
+                    wl = self.wl(**{
+                        field: [{"name": "c", "volumeMounts": [{"name": "sa-tok", "mountPath": mount_path}]}]
+                    })
+                    self.assertEqual(collect.check_unbound_sa_automount(self.ctx(workloads=[wl])), [])
+
+    def test_a_projected_token_mounted_at_a_custom_path_is_still_flagged(self):
+        wl = self.wl(
+            containers=[{"name": "c", "volumeMounts": [{"name": "tok", "mountPath": "/var/run/secrets/tokens"}]}]
+        )
+        self.assertEqual(len(collect.check_unbound_sa_automount(self.ctx(workloads=[wl]))), 1)
+
+    def test_a_bare_pod_with_admission_kube_api_access_mount_is_still_flagged(self):
+        bare_pod = {
+            "kind": "Pod",
+            "ns": "shop",
+            "name": "standalone-worker",
+            "spec": {
+                "serviceAccountName": "api-sa",
+                "containers": [
+                    {
+                        "name": "worker",
+                        "volumeMounts": [
+                            {
+                                "name": "kube-api-access-9x2pq",
+                                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        (hit,) = collect.check_unbound_sa_automount(self.ctx(workloads=[bare_pod]))
+        self.assertEqual(hit["object"], "Pod/standalone-worker")
+
+    def test_explicit_true_automount_uses_non_unset_excerpt(self):
+        wl = self.wl(automountServiceAccountToken=True)
+        (hit,) = collect.check_unbound_sa_automount(self.ctx(workloads=[wl]))
+        self.assertIn("not false on either", hit["excerpt"])
+
     def test_it_is_on_the_compliance_roster(self):
         spec = next(c for c in collect.COMPLIANCE_CHECKS if c.slug == "unbound-sa-automount")
         self.assertEqual(spec.kind, "cluster")

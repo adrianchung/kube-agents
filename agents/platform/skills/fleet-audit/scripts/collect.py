@@ -5359,6 +5359,9 @@ _SA_NAMESPACE_GROUP_PREFIX = "system:serviceaccounts:"
 # so it is not skipped here either.
 _VAULT_AGENT_INJECT_ANNOTATION = "vault.hashicorp.com/agent-inject"
 _VAULT_AGENT_INJECT_TRUE = frozenset({"1", "t", "T", "true", "True", "TRUE"})
+_GKE_WI_GSA_ANNOTATION = "iam.gke.io/gcp-service-account"
+_DEFAULT_SA_TOKEN_MOUNT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
+_ADMISSION_SA_VOLUME_PREFIX = "kube-api-access-"
 _BASELINE_AUTHENTICATED_ROLES = frozenset({
     "system:basic-user",
     "system:discovery",
@@ -5417,6 +5420,32 @@ def _sa_groups_granted(context: dict) -> tuple[bool, set[str]]:
     return universal, namespaces
 
 
+def _containers_mount_default_sa_path(wl: dict) -> bool:
+    """True when any declared container explicitly mounts `/var/run/secrets/kubernetes.io/serviceaccount`.
+
+    Controller templates (Deployment, StatefulSet, DaemonSet, Job, CronJob) do
+    not carry Kubernetes' admission-injected `kube-api-access-*` mount, so any
+    `volumeMounts` entry at `/var/run/secrets/kubernetes.io/serviceaccount`
+    there was explicitly declared for a consumer reading that path. Bare `Pod`
+    objects in a live dump DO carry the admission-injected `kube-api-access-*`
+    volume, so skip `kube-api-access-*` mounts on `Pod` objects lest every bare
+    Pod suppress itself.
+    """
+    spec = wl.get("spec") or {}
+    is_bare_pod = wl.get("kind") == "Pod"
+    for field in ("containers", "initContainers", "ephemeralContainers"):
+        for container in spec.get(field) or []:
+            for mount in container.get("volumeMounts") or []:
+                if is_bare_pod and str(mount.get("name") or "").startswith(_ADMISSION_SA_VOLUME_PREFIX):
+                    continue
+                raw_path = str(mount.get("mountPath") or "").rstrip("/")
+                if raw_path == _DEFAULT_SA_TOKEN_MOUNT_PATH or raw_path.startswith(
+                    _DEFAULT_SA_TOKEN_MOUNT_PATH + "/"
+                ):
+                    return True
+    return False
+
+
 def check_unbound_sa_automount(context: dict) -> list[dict]:
     """§2.14 -- a token mounted for a ServiceAccount nothing has granted.
 
@@ -5438,16 +5467,17 @@ def check_unbound_sa_automount(context: dict) -> list[dict]:
     nothing. It does not prove that nothing else reads the token: an external
     verifier that reviews it with its own identity -- Vault's `kubernetes`
     auth method, fed by the Vault Agent injector's sidecar -- needs no binding
-    here. The injector announces itself on the pod template, so that case is
-    skipped; any other such consumer is what the remediation's `risk` tells
-    the reviewer to rule out.
+    here. The injector announces itself on the pod template, a ServiceAccount
+    annotated with `iam.gke.io/gcp-service-account` is bound in Google Cloud
+    IAM rather than Kubernetes RBAC, and a container explicitly mounting
+    `/var/run/secrets/kubernetes.io/serviceaccount` declares its own token
+    consumer, so all three shapes are skipped; any other external consumer is
+    what the remediation's `risk` tells the reviewer to rule out.
 
-    An explicit projected `serviceAccountToken` volume is unaffected by
-    `automountServiceAccountToken` and is therefore not an exclusion: a
-    workload federating to an external audience through its own declared
-    volume keeps working across this fix (the Vault Agent sidecar reads the
-    default mount, hence the skip above). GKE Workload Identity likewise reaches Google Cloud
-    through the metadata server rather than this token.
+    An explicit projected `serviceAccountToken` volume mounted at a separate
+    path is unaffected by `automountServiceAccountToken` and is therefore not
+    an exclusion: a workload federating to an external audience through its own
+    declared path keeps working across this fix.
     """
     universal, granted_namespaces = _sa_groups_granted(context)
     if universal:
@@ -5485,9 +5515,20 @@ def check_unbound_sa_automount(context: dict) -> list[dict]:
             continue
         if key in bound or wl["ns"] in granted_namespaces:
             continue
+        sa_annotations = (sa.get("metadata") or {}).get("annotations") or {}
+        if str(sa_annotations.get(_GKE_WI_GSA_ANNOTATION) or "").strip():
+            continue
         inject = str((wl.get("pod_annotations") or {}).get(_VAULT_AGENT_INJECT_ANNOTATION, ""))
         if inject in _VAULT_AGENT_INJECT_TRUE:
             continue
+        if _containers_mount_default_sa_path(wl):
+            continue
+        automount_state = (
+            "automountServiceAccountToken unset on both the pod and the ServiceAccount"
+            if wl["spec"].get("automountServiceAccountToken") is None
+            and sa.get("automountServiceAccountToken") is None
+            else "automountServiceAccountToken not false on either the pod or the ServiceAccount"
+        )
         hits.append(
             {
                 "namespace": wl["ns"],
@@ -5497,8 +5538,8 @@ def check_unbound_sa_automount(context: dict) -> list[dict]:
                 # the object name does not answer it -- charts routinely name
                 # the ServiceAccount something other than the Deployment.
                 "excerpt": (
-                    f"serviceAccountName={sa_name}, automountServiceAccountToken unset on both "
-                    f"the pod and the ServiceAccount; no RoleBinding or ClusterRoleBinding "
+                    f"serviceAccountName={sa_name}, {automount_state}; "
+                    f"no RoleBinding or ClusterRoleBinding "
                     f"names ServiceAccount {wl['ns']}/{sa_name} as a subject"
                 ),
                 # Same reason as §2.7's: a cluster-kind check that walks the

@@ -342,12 +342,13 @@ class PlantedStackFileTest(unittest.TestCase):
         self.assertTrue(record["clean"])
         self.assertEqual([m for m, _, _ in github.calls if m == "DELETE"], [])
 
-    def test_no_file_is_a_quiet_clean_and_only_the_one_path_is_read(self):
+    def test_no_file_is_a_quiet_clean_and_only_the_listed_paths_are_read(self):
         github = FakeGitHub()
         record, _, err = run_reset(github)
         self.assertTrue(record["clean"])
         contents = [path for m, path, _ in github.calls if "/contents/" in path]
-        self.assertEqual(contents, [f"/repos/{REPO}/contents/{PLANTED}?ref=main"] * 2)
+        expected = [f"/repos/{REPO}/contents/{p}?ref=main" for p in helper.PLANTED_STACK_FILES] * 2
+        self.assertEqual(contents, expected)
         self.assertEqual(err, "")
 
     def test_a_delete_github_refuses_leaves_the_repository_not_clean(self):
@@ -366,13 +367,22 @@ class PlantedStackFileTest(unittest.TestCase):
         self.assertIn("would delete 1 stack file(s)", out)
 
     def test_the_path_and_the_label_are_the_stacks(self):
-        stack = (REPO_ROOT / "bench" / "tf" / "prebuilt" / "kustomize-overlay-declaration")
-        self.assertEqual(helper.PLANTED_STACK_FILES, (PLANTED,))
+        stack = REPO_ROOT / "bench" / "tf" / "prebuilt" / "kustomize-overlay-declaration"
+        sa_stack = REPO_ROOT / "bench" / "tf" / "prebuilt" / "security-unused-sa-token-automount"
+        sa_files = tuple(
+            f"clusters/platform-agent-host/namespaces/seeded-sa-automount/{name}.yaml"
+            for name in ("order-processor", "config-watcher", "gcs-archiver", "vault-fetcher")
+        )
+        self.assertEqual(helper.PLANTED_STACK_FILES, (PLANTED, *sa_files))
         self.assertIn('default     = "clusters/seeded-a/seeded-reliability"', (stack / "variables.tf").read_text())
-        plant = (stack / "plant.py").read_text()
-        self.assertIn(f'MANAGED_BY_KEY = "{helper.STACK_LABEL_KEY}"', plant)
-        self.assertIn(f'MANAGED_BY = "{helper.STACK_LABEL_VALUE}"', plant)
-        self.assertIn(f'KUSTOMIZATION_FILE = "{PLANTED.rsplit("/", 1)[1]}"', plant)
+        for s in (stack, sa_stack):
+            plant_src = (s / "plant.py").read_text()
+            self.assertIn(f'MANAGED_BY_KEY = "{helper.STACK_LABEL_KEY}"', plant_src)
+            self.assertIn(f'MANAGED_BY = "{helper.STACK_LABEL_VALUE}"', plant_src)
+        self.assertIn(f'KUSTOMIZATION_FILE = "{PLANTED.rsplit("/", 1)[1]}"', (stack / "plant.py").read_text())
+        sa_plant = (sa_stack / "plant.py").read_text()
+        for p in sa_files:
+            self.assertIn(f'"{p.rsplit("/", 1)[1]}"', sa_plant)
 
 
 class RetryTest(unittest.TestCase):
