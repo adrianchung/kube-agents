@@ -877,7 +877,12 @@ class _MainHarness(unittest.TestCase):
         self.addCleanup(self.root.cleanup)
         write_tree(self.root.name, OWNERS_TREE)
         self.summary = Path(self.root.name) / "summary.md"
-        env = {"GITHUB_TOKEN": "t", rr.STEP_SUMMARY_ENV: str(self.summary), rr.ACTIONS_ENV: "true"}
+        env = {
+            "GITHUB_TOKEN": "t",
+            "GITHUB_REPOSITORY": "gke-labs/kube-agents",
+            rr.STEP_SUMMARY_ENV: str(self.summary),
+            rr.ACTIONS_ENV: "true",
+        }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)

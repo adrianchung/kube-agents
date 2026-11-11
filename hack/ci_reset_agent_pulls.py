@@ -94,10 +94,16 @@ RETRYABLE_STATUS_FLOOR = 500
 CALL_FAULTS = (urllib.error.HTTPError, OSError, http.client.HTTPException)
 # The files a case stack plants on the default branch and that this reset
 # deletes when a killed unit left them, and the label that makes such a file
-# the stack's. bench/tf/prebuilt/kustomize-overlay-declaration/plant.py writes
-# the same path and label; scripts/test_ci_eval_agent_pulls_reset.py holds
-# them equal.
-PLANTED_STACK_FILES = ("clusters/seeded-a/seeded-reliability/kustomization.yaml",)
+# the stack's. bench/tf/prebuilt/{kustomize-overlay-declaration,security-unused-sa-token-automount}/plant.py
+# write the same paths and label; scripts/test_ci_eval_agent_pulls_reset.py
+# holds them equal.
+PLANTED_STACK_FILES = (
+    "clusters/seeded-a/seeded-reliability/kustomization.yaml",
+    "clusters/platform-agent-host/namespaces/seeded-sa-automount/order-processor.yaml",
+    "clusters/platform-agent-host/namespaces/seeded-sa-automount/config-watcher.yaml",
+    "clusters/platform-agent-host/namespaces/seeded-sa-automount/gcs-archiver.yaml",
+    "clusters/platform-agent-host/namespaces/seeded-sa-automount/vault-fetcher.yaml",
+)
 STACK_LABEL_KEY = "managed-by"
 STACK_LABEL_VALUE = "kube-agents-bench"
 STACK_FILE_DELETE_MESSAGE = "test(bench): remove {path}, which an eval stack left behind (reset {scope})"

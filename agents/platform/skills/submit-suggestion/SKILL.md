@@ -205,7 +205,11 @@ for a chart, the owning files and pins for Terraform, then `tofu fmt`). You
 have edited nothing yet, so nothing is lost: its `prepare` opens the copy
 under its own branch name, and its last step submits that branch through
 Step 3 here. Leave the copy you prepared here unused. A plain Kubernetes
-manifest has no authoring skill; write it here.
+manifest is written here, except when hardening workload security controls
+(disabling ServiceAccount token auto-mounting, NetworkPolicies, Pod Security
+Standards, or gVisor), where you load **gke-workload-security** with
+`skill_view` first and run every live-cluster pre-flight check it requires
+before editing.
 
 **When the branch is already decided, stay on it.** In a review round
 (Step 5), or when `prepare` returned a non-empty `proposal`, the revisions

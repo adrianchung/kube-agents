@@ -7,6 +7,7 @@ Run from scripts/: python3 -m unittest test_eval_dashboard_scrub_bot_posts
 
 import io
 import json
+import os
 import re
 import unittest
 import unittest.mock
@@ -435,6 +436,9 @@ class ReadListTest(unittest.TestCase):
 
 class ApplyTest(unittest.TestCase):
     def setUp(self):
+        patcher = unittest.mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "gke-labs/kube-agents"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.runner = FakeRunner(
             comments=[comment(7, OLD_GATE_COMMENT, on=1488), comment(8, "a human's"), comment(9, OLD_GATE_COMMENT, on=5004), comment(10, CURRENT_GATE_COMMENT, on=1500)],
             open_prs=[5004],
