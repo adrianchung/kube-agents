@@ -389,7 +389,11 @@ class ListTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def setUp(self):
-        self.environ = mock.patch.dict(os.environ, {"GITHUB_TOKEN": "x", "GITHUB_ACTIONS": "true"}, clear=False)
+        self.environ = mock.patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "x", "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "gke-labs/kube-agents"},
+            clear=False,
+        )
         self.environ.start()
         self.addCleanup(self.environ.stop)
         self.summary = tempfile.NamedTemporaryFile("r", suffix=".md", delete=False)
